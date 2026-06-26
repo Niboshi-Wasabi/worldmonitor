@@ -3,6 +3,7 @@ import type { SignalType } from '@/utils/analysis-constants';
 import { MILITARY_BASES_EXPANDED } from '@/config/bases-expanded';
 import { focalPointDetector } from './focal-point-detector';
 import { getCountryScore } from './country-instability';
+import { getCachedCountryScoreValue } from './cached-risk-scores';
 
 // Foreign military concentration detection - immediate alerts, no baseline needed
 interface GeoRegion {
@@ -552,7 +553,7 @@ export function foreignPresenceToSignal(alert: ForeignPresenceAlert): {
   const newsContext = focalPointDetector.getNewsCorrelationContext(relevantCountries);
 
   // Build enhanced description with news correlation
-  let description = `${alert.aircraftCount} ${alert.operatorCountry} aircraft detected in ${alert.region.name}. ` +
+  const description = `${alert.aircraftCount} ${alert.operatorCountry} aircraft detected in ${alert.region.name}. ` +
     `${aircraftList}. Callsigns: ${callsigns.slice(0, 4).join(', ')}${callsigns.length > 4 ? '...' : ''}`;
 
   // Check for critical focal points in affected region
@@ -958,7 +959,7 @@ export function recalcPostureWithVessels(postures: TheaterPostureSummary[]): voi
     if (theater.targetNation) {
       const code = TARGET_NATION_CODES[theater.targetNation];
       if (code) {
-        const cii = getCountryScore(code);
+        const cii = getCachedCountryScoreValue(code) ?? getCountryScore(code);
         if (cii !== null) {
           ciiLevel = cii >= 85 ? 2 : cii >= 70 ? 1 : 0;
         }

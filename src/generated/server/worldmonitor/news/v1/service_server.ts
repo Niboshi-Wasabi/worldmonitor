@@ -8,20 +8,80 @@ export interface SummarizeArticleRequest {
   geoContext: string;
   variant: string;
   lang: string;
+  systemAppend: string;
+  bodies: string[];
 }
 
 export interface SummarizeArticleResponse {
   summary: string;
   model: string;
   provider: string;
-  cached: boolean;
   tokens: number;
   fallback: boolean;
-  skipped: boolean;
-  reason: string;
   error: string;
   errorType: string;
+  status: SummarizeStatus;
+  statusDetail: string;
 }
+
+export interface GetSummarizeArticleCacheRequest {
+  cacheKey: string;
+}
+
+export interface ListFeedDigestRequest {
+  variant: string;
+  lang: string;
+}
+
+export interface ListFeedDigestResponse {
+  categories: Record<string, CategoryBucket>;
+  feedStatuses: Record<string, string>;
+  generatedAt: string;
+}
+
+export interface CategoryBucket {
+  items: NewsItem[];
+}
+
+export interface NewsItem {
+  source: string;
+  title: string;
+  link: string;
+  publishedAt: number;
+  isAlert: boolean;
+  threat?: ThreatClassification;
+  location?: GeoCoordinates;
+  locationName: string;
+  importanceScore: number;
+  corroborationCount: number;
+  storyMeta?: StoryMeta;
+  snippet: string;
+}
+
+export interface ThreatClassification {
+  level: ThreatLevel;
+  category: string;
+  confidence: number;
+  source: string;
+}
+
+export interface GeoCoordinates {
+  latitude: number;
+  longitude: number;
+}
+
+export interface StoryMeta {
+  firstSeen: number;
+  mentionCount: number;
+  sourceCount: number;
+  phase: StoryPhase;
+}
+
+export type StoryPhase = "STORY_PHASE_UNSPECIFIED" | "STORY_PHASE_BREAKING" | "STORY_PHASE_DEVELOPING" | "STORY_PHASE_SUSTAINED" | "STORY_PHASE_FADING";
+
+export type SummarizeStatus = "SUMMARIZE_STATUS_UNSPECIFIED" | "SUMMARIZE_STATUS_SUCCESS" | "SUMMARIZE_STATUS_CACHED" | "SUMMARIZE_STATUS_SKIPPED" | "SUMMARIZE_STATUS_ERROR";
+
+export type ThreatLevel = "THREAT_LEVEL_UNSPECIFIED" | "THREAT_LEVEL_LOW" | "THREAT_LEVEL_MEDIUM" | "THREAT_LEVEL_HIGH" | "THREAT_LEVEL_CRITICAL";
 
 export interface FieldViolation {
   field: string;
@@ -69,6 +129,8 @@ export interface RouteDescriptor {
 
 export interface NewsServiceHandler {
   summarizeArticle(ctx: ServerContext, req: SummarizeArticleRequest): Promise<SummarizeArticleResponse>;
+  getSummarizeArticleCache(ctx: ServerContext, req: GetSummarizeArticleCacheRequest): Promise<SummarizeArticleResponse>;
+  listFeedDigest(ctx: ServerContext, req: ListFeedDigestRequest): Promise<ListFeedDigestResponse>;
 }
 
 export function createNewsServiceRoutes(
@@ -98,6 +160,101 @@ export function createNewsServiceRoutes(
 
           const result = await handler.summarizeArticle(ctx, body);
           return new Response(JSON.stringify(result as SummarizeArticleResponse), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        } catch (err: unknown) {
+          if (err instanceof ValidationError) {
+            return new Response(JSON.stringify({ violations: err.violations }), {
+              status: 400,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (options?.onError) {
+            return options.onError(err, req);
+          }
+          const message = err instanceof Error ? err.message : String(err);
+          return new Response(JSON.stringify({ message }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+      },
+    },
+    {
+      method: "GET",
+      path: "/api/news/v1/summarize-article-cache",
+      handler: async (req: Request): Promise<Response> => {
+        try {
+          const pathParams: Record<string, string> = {};
+          const url = new URL(req.url, "http://localhost");
+          const params = url.searchParams;
+          const body: GetSummarizeArticleCacheRequest = {
+            cacheKey: params.get("cache_key") ?? "",
+          };
+          if (options?.validateRequest) {
+            const bodyViolations = options.validateRequest("getSummarizeArticleCache", body);
+            if (bodyViolations) {
+              throw new ValidationError(bodyViolations);
+            }
+          }
+
+          const ctx: ServerContext = {
+            request: req,
+            pathParams,
+            headers: Object.fromEntries(req.headers.entries()),
+          };
+
+          const result = await handler.getSummarizeArticleCache(ctx, body);
+          return new Response(JSON.stringify(result as SummarizeArticleResponse), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        } catch (err: unknown) {
+          if (err instanceof ValidationError) {
+            return new Response(JSON.stringify({ violations: err.violations }), {
+              status: 400,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (options?.onError) {
+            return options.onError(err, req);
+          }
+          const message = err instanceof Error ? err.message : String(err);
+          return new Response(JSON.stringify({ message }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+      },
+    },
+    {
+      method: "GET",
+      path: "/api/news/v1/list-feed-digest",
+      handler: async (req: Request): Promise<Response> => {
+        try {
+          const pathParams: Record<string, string> = {};
+          const url = new URL(req.url, "http://localhost");
+          const params = url.searchParams;
+          const body: ListFeedDigestRequest = {
+            variant: params.get("variant") ?? "",
+            lang: params.get("lang") ?? "",
+          };
+          if (options?.validateRequest) {
+            const bodyViolations = options.validateRequest("listFeedDigest", body);
+            if (bodyViolations) {
+              throw new ValidationError(bodyViolations);
+            }
+          }
+
+          const ctx: ServerContext = {
+            request: req,
+            pathParams,
+            headers: Object.fromEntries(req.headers.entries()),
+          };
+
+          const result = await handler.listFeedDigest(ctx, body);
+          return new Response(JSON.stringify(result as ListFeedDigestResponse), {
             status: 200,
             headers: { "Content-Type": "application/json" },
           });

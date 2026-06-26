@@ -11,7 +11,11 @@ import type {
   SocialUnrestEvent,
   AisDisruptionEvent,
 } from '@/types';
-import { TIER1_COUNTRIES } from '@/config/countries';
+import type { CountrySanctionsPressure } from './sanctions-pressure';
+import type { RadiationObservation } from './radiation';
+import { getCountryAtCoordinates, getCountryNameByCode, nameToCountryCode, ME_STRIKE_BOUNDS, resolveCountryFromBounds } from './country-geometry';
+
+export const SIGNAL_AGGREGATOR_MAX_SIGNALS = 1000;
 
 export type SignalType =
   | 'internet_outage'
@@ -20,7 +24,10 @@ export type SignalType =
   | 'protest'
   | 'ais_disruption'
   | 'satellite_fire'        // NASA FIRMS thermal anomalies
-  | 'temporal_anomaly'      // Baseline deviation alerts
+  | 'radiation_anomaly'     // Radiation readings meaningfully above local baseline
+  | 'temporal_anomaly'
+  | 'sanctions_pressure'      // Baseline deviation alerts
+  | 'active_strike'         // Iran attack / military conflict events
 
 export interface GeoSignal {
   type: SignalType;
@@ -31,6 +38,8 @@ export interface GeoSignal {
   severity: 'low' | 'medium' | 'high';
   title: string;
   timestamp: Date;
+  strikeCount?: number;
+  highSeverityStrikeCount?: number;
 }
 
 export interface CountrySignalCluster {
@@ -87,23 +96,13 @@ const REGION_DEFINITIONS: Record<string, { countries: string[]; name: string }> 
   },
 };
 
-const COUNTRY_TO_CODE: Record<string, string> = {
-  'Iran': 'IR', 'Israel': 'IL', 'Saudi Arabia': 'SA', 'United Arab Emirates': 'AE',
-  'Iraq': 'IQ', 'Syria': 'SY', 'Yemen': 'YE', 'Jordan': 'JO', 'Lebanon': 'LB',
-  'China': 'CN', 'Taiwan': 'TW', 'Japan': 'JP', 'South Korea': 'KR', 'North Korea': 'KP',
-  'India': 'IN', 'Pakistan': 'PK', 'Bangladesh': 'BD', 'Afghanistan': 'AF',
-  'Ukraine': 'UA', 'Russia': 'RU', 'Belarus': 'BY', 'Poland': 'PL',
-  'Egypt': 'EG', 'Libya': 'LY', 'Sudan': 'SD', 'South Sudan': 'SS',
-  'United States': 'US', 'United Kingdom': 'GB', 'Germany': 'DE', 'France': 'FR',
-};
-
 function normalizeCountryCode(country: string): string {
   if (country.length === 2) return country.toUpperCase();
-  return COUNTRY_TO_CODE[country] || country.slice(0, 2).toUpperCase();
+  return nameToCountryCode(country) || country.slice(0, 2).toUpperCase();
 }
 
 function getCountryName(code: string): string {
-  return TIER1_COUNTRIES[code] || code;
+  return getCountryNameByCode(code) || code;
 }
 
 class SignalAggregator {
@@ -111,9 +110,32 @@ class SignalAggregator {
   private readonly WINDOW_MS = 24 * 60 * 60 * 1000;
   // Tracks which source event type each temporal anomaly signal came from
   private temporalSourceMap = new WeakMap<GeoSignal, string>();
+  // Tracks signals added by ingestTheaterPostures so they can be cleared on re-ingestion
+  private theaterPostureSignals: GeoSignal[] = [];
 
   private clearSignalType(type: SignalType): void {
     this.signals = this.signals.filter(s => s.type !== type);
+    this.syncTheaterPostureReferences();
+  }
+
+  private enforceSignalCap(): void {
+    if (this.signals.length <= SIGNAL_AGGREGATOR_MAX_SIGNALS) return;
+
+    const keep = new Set(
+      this.signals
+        .map((signal, index) => ({ signal, index }))
+        .sort((a, b) => b.signal.timestamp.getTime() - a.signal.timestamp.getTime() || b.index - a.index)
+        .slice(0, SIGNAL_AGGREGATOR_MAX_SIGNALS)
+        .map((entry) => entry.signal)
+    );
+    this.signals = this.signals.filter(s => keep.has(s));
+    this.syncTheaterPostureReferences();
+  }
+
+  private syncTheaterPostureReferences(): void {
+    if (this.theaterPostureSignals.length === 0) return;
+    const retained = new Set(this.signals);
+    this.theaterPostureSignals = this.theaterPostureSignals.filter(s => retained.has(s));
   }
 
   ingestOutages(outages: InternetOutage[]): void {
@@ -138,7 +160,7 @@ class SignalAggregator {
     this.clearSignalType('military_flight');
     const countryCounts = new Map<string, number>();
     for (const f of flights) {
-      const code = this.coordsToCountry(f.lat, f.lon);
+      const code = this.coordsToCountryWithFallback(f.lat, f.lon);
       const count = countryCounts.get(code) || 0;
       countryCounts.set(code, count + 1);
     }
@@ -163,7 +185,7 @@ class SignalAggregator {
     const regionCounts = new Map<string, { count: number; lat: number; lon: number }>();
 
     for (const v of vessels) {
-      const code = this.coordsToCountry(v.lat, v.lon);
+      const code = this.coordsToCountryWithFallback(v.lat, v.lon);
       const existing = regionCounts.get(code);
       if (existing) {
         existing.count++;
@@ -270,6 +292,27 @@ class SignalAggregator {
     this.pruneOld();
   }
 
+  ingestRadiationObservations(observations: RadiationObservation[]): void {
+    this.clearSignalType('radiation_anomaly');
+
+    for (const observation of observations) {
+      if (observation.severity === 'normal') continue;
+      const code = normalizeCountryCode(observation.country) || this.coordsToCountry(observation.lat, observation.lon);
+
+      this.signals.push({
+        type: 'radiation_anomaly',
+        country: code,
+        countryName: getCountryName(code),
+        lat: observation.lat,
+        lon: observation.lon,
+        severity: observation.severity === 'spike' ? 'high' : 'medium',
+        title: `${observation.severity === 'spike' ? 'Radiation spike' : 'Elevated radiation'} at ${observation.location} (${observation.delta >= 0 ? '+' : ''}${observation.delta.toFixed(1)} ${observation.unit} vs baseline)`,
+        timestamp: observation.observedAt,
+      });
+    }
+    this.pruneOld();
+  }
+
 
 
 
@@ -285,12 +328,14 @@ class SignalAggregator {
     zScore: number;
     message: string;
     severity: 'medium' | 'high' | 'critical';
-  }>): void {
-    // Remove existing temporal signals that match incoming source types
-    const incomingSourceTypes = new Set(anomalies.map(a => a.type));
+  }>, trackedTypes?: string[]): void {
+    // Clear signals for tracked types (server tells us which types it covers)
+    const typesToClear = trackedTypes?.length
+      ? new Set(trackedTypes)
+      : new Set(anomalies.map(a => a.type));
     this.signals = this.signals.filter(s =>
       s.type !== 'temporal_anomaly' ||
-      !incomingSourceTypes.has(this.temporalSourceMap.get(s) || '')
+      !typesToClear.has(this.temporalSourceMap.get(s) || '')
     );
 
     for (const a of anomalies) {
@@ -310,22 +355,179 @@ class SignalAggregator {
     this.pruneOld();
   }
 
+  ingestSanctionsPressure(countries: CountrySanctionsPressure[]): void {
+    this.clearSignalType('sanctions_pressure');
+
+    for (const country of countries) {
+      const code = normalizeCountryCode(country.countryCode || country.countryName);
+      const severity: 'low' | 'medium' | 'high' =
+        country.newEntryCount >= 5 || country.entryCount >= 50
+          ? 'high'
+          : country.newEntryCount >= 1 || country.entryCount >= 20
+            ? 'medium'
+            : 'low';
+      if (country.newEntryCount === 0 && country.entryCount < 20) continue;
+
+      this.signals.push({
+        type: 'sanctions_pressure',
+        country: code,
+        countryName: country.countryName || getCountryName(code),
+        lat: 0,
+        lon: 0,
+        severity,
+        title: country.newEntryCount > 0
+          ? `${country.newEntryCount} new OFAC designation${country.newEntryCount === 1 ? '' : 's'} tied to ${country.countryName}`
+          : `${country.entryCount} OFAC-linked designations tied to ${country.countryName}`,
+        timestamp: new Date(),
+      });
+    }
+    this.pruneOld();
+  }
+
+
+  ingestConflictEvents(events: Array<{
+    id: string;
+    category: string;
+    severity: string;
+    latitude: number;
+    longitude: number;
+    timestamp: number;
+  }>): void {
+    this.clearSignalType('active_strike');
+
+    const seen = new Set<string>();
+    const deduped = events.filter(e => {
+      if (seen.has(e.id)) return false;
+      seen.add(e.id);
+      return true;
+    });
+
+    const byCountry = new Map<string, typeof deduped>();
+    for (const e of deduped) {
+      const code = this.coordsToCountryWithFallback(e.latitude, e.longitude);
+      if (code === 'XX') continue;
+      const arr = byCountry.get(code) || [];
+      arr.push(e);
+      byCountry.set(code, arr);
+    }
+
+    const MAX_PER_COUNTRY = 50;
+    for (const [code, countryEvents] of byCountry) {
+      const capped = countryEvents.slice(0, MAX_PER_COUNTRY);
+      const highCount = capped.filter(e => {
+        const sev = e.severity.toLowerCase();
+        return sev === 'high' || sev === 'critical';
+      }).length;
+      const timestamps = capped.map(e => e.timestamp < 1e12 ? e.timestamp * 1000 : e.timestamp);
+      const maxTs = timestamps.length > 0 ? Math.max(...timestamps) : 0;
+      const safeTs = maxTs > 0 ? maxTs : Date.now();
+
+      this.signals.push({
+        type: 'active_strike',
+        country: code,
+        countryName: getCountryName(code),
+        lat: capped[0]!.latitude,
+        lon: capped[0]!.longitude,
+        severity: highCount >= 5 ? 'high' : highCount >= 2 ? 'medium' : 'low',
+        title: `${capped.length} strikes (${highCount} high severity)`,
+        timestamp: new Date(safeTs),
+        strikeCount: capped.length,
+        highSeverityStrikeCount: highCount,
+      });
+    }
+    this.pruneOld();
+  }
+
+  ingestTheaterPostures(postures: Array<{
+    targetNation: string | null;
+    totalAircraft: number;
+    totalVessels: number;
+    postureLevel: 'normal' | 'elevated' | 'critical';
+    theaterName: string;
+  }>): void {
+    const TARGET_CODES: Record<string, string> = {
+      'Iran': 'IR', 'Taiwan': 'TW', 'North Korea': 'KP',
+      'Gaza': 'PS', 'Yemen': 'YE',
+    };
+
+    // Remove previously-added theater posture signals before re-ingesting (idempotency)
+    const prev = new Set(this.theaterPostureSignals);
+    this.signals = this.signals.filter(s => !prev.has(s));
+    this.theaterPostureSignals = [];
+
+    // Remove real signals only for the specific type that will be replaced by theater summary.
+    // Tracked per-type so that e.g. an aircraft-only posture doesn't erase real vessel signals.
+    const activeFlightCodes = new Set<string>();
+    const activeVesselCodes = new Set<string>();
+    for (const p of postures) {
+      if (!p.targetNation || p.postureLevel === 'normal') continue;
+      const code = TARGET_CODES[p.targetNation];
+      if (!code) continue;
+      if (p.totalAircraft > 0) activeFlightCodes.add(code);
+      if (p.totalVessels > 0) activeVesselCodes.add(code);
+    }
+    if (activeFlightCodes.size > 0 || activeVesselCodes.size > 0) {
+      this.signals = this.signals.filter(s => {
+        if (s.type === 'military_flight' && activeFlightCodes.has(s.country)) return false;
+        if (s.type === 'military_vessel' && activeVesselCodes.has(s.country)) return false;
+        return true;
+      });
+    }
+
+    for (const p of postures) {
+      if (!p.targetNation || p.postureLevel === 'normal') continue;
+      const code = TARGET_CODES[p.targetNation];
+      if (!code) continue;
+
+      if (p.totalAircraft > 0) {
+        const sig: GeoSignal = {
+          type: 'military_flight',
+          country: code,
+          countryName: getCountryName(code),
+          lat: 0,
+          lon: 0,
+          severity: p.postureLevel === 'critical' ? 'high' : 'medium',
+          title: `${p.totalAircraft} military aircraft in ${p.theaterName}`,
+          timestamp: new Date(),
+        };
+        this.signals.push(sig);
+        this.theaterPostureSignals.push(sig);
+      }
+
+      if (p.totalVessels > 0) {
+        const sig: GeoSignal = {
+          type: 'military_vessel',
+          country: code,
+          countryName: getCountryName(code),
+          lat: 0,
+          lon: 0,
+          severity: p.totalVessels >= 5 ? 'high' : 'medium',
+          title: `${p.totalVessels} naval vessels in ${p.theaterName}`,
+          timestamp: new Date(),
+        };
+        this.signals.push(sig);
+        this.theaterPostureSignals.push(sig);
+      }
+    }
+    this.pruneOld();
+  }
+
   private coordsToCountry(lat: number, lon: number): string {
-    if (lat >= 25 && lat <= 40 && lon >= 44 && lon <= 63) return 'IR';
-    if (lat >= 29 && lat <= 33 && lon >= 34 && lon <= 36) return 'IL';
-    if (lat >= 15 && lat <= 32 && lon >= 34 && lon <= 55) return 'SA';
-    if (lat >= 20 && lat <= 55 && lon >= 73 && lon <= 135) return 'CN';
-    if (lat >= 22 && lat <= 25 && lon >= 120 && lon <= 122) return 'TW';
-    if (lat >= 8 && lat <= 37 && lon >= 68 && lon <= 97) return 'IN';
-    if (lat >= 44 && lat <= 52 && lon >= 22 && lon <= 40) return 'UA';
-    if (lat >= 50 && lat <= 82 && lon >= 20 && lon <= 180) return 'RU';
-    if (lat >= 22 && lat <= 32 && lon >= 25 && lon <= 35) return 'EG';
-    return 'XX';
+    const hit = getCountryAtCoordinates(lat, lon);
+    return hit?.code ?? 'XX';
+  }
+
+  private coordsToCountryWithFallback(lat: number, lon: number): string {
+    const hit = getCountryAtCoordinates(lat, lon);
+    if (hit?.code) return hit.code;
+    return resolveCountryFromBounds(lat, lon, ME_STRIKE_BOUNDS) ?? 'XX';
   }
 
   private pruneOld(): void {
     const cutoff = Date.now() - this.WINDOW_MS;
     this.signals = this.signals.filter(s => s.timestamp.getTime() > cutoff);
+    this.syncTheaterPostureReferences();
+    this.enforceSignalCap();
   }
 
   getCountryClusters(): CountrySignalCluster[] {
@@ -386,7 +588,10 @@ class SignalAggregator {
           protest: 'civil unrest',
           ais_disruption: 'shipping anomalies',
           satellite_fire: 'thermal anomalies',
+          radiation_anomaly: 'radiation anomalies',
           temporal_anomaly: 'baseline anomalies',
+          sanctions_pressure: 'sanctions pressure',
+          active_strike: 'active strikes',
         };
 
         const typeDescriptions = [...allTypes].map(t => typeLabels[t]).join(', ');
@@ -441,7 +646,10 @@ class SignalAggregator {
       protest: 0,
       ais_disruption: 0,
       satellite_fire: 0,
+      radiation_anomaly: 0,
       temporal_anomaly: 0,
+      sanctions_pressure: 0,
+      active_strike: 0,
     };
 
     for (const s of this.signals) {
@@ -460,6 +668,8 @@ class SignalAggregator {
 
   clear(): void {
     this.signals = [];
+    this.temporalSourceMap = new WeakMap<GeoSignal, string>();
+    this.theaterPostureSignals = [];
   }
 
   getSignalCount(): number {
@@ -468,27 +678,3 @@ class SignalAggregator {
 }
 
 export const signalAggregator = new SignalAggregator();
-
-export function logSignalSummary(): void {
-  const summary = signalAggregator.getSummary();
-
-  console.group('%c[Signal Aggregator]', 'color: #6b8afd; font-weight: bold');
-  console.log(`Total signals: ${summary.totalSignals}`);
-  console.log('By type:', summary.byType);
-
-  if (summary.convergenceZones.length > 0) {
-    console.log('%cConvergence Zones:', 'color: #f59e0b; font-weight: bold');
-    for (const z of summary.convergenceZones) {
-      console.log(`  ${z.description}`);
-    }
-  }
-
-  if (summary.topCountries.length > 0) {
-    console.log('%cTop Countries:', 'color: #4ade80; font-weight: bold');
-    for (const c of summary.topCountries.slice(0, 5)) {
-      console.log(`  ${c.countryName}: ${c.totalCount} signals, score ${c.convergenceScore}`);
-    }
-  }
-
-  console.groupEnd();
-}

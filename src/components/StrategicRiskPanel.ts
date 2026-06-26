@@ -18,18 +18,37 @@ import {
   type DataSourceState,
   type DataFreshnessSummary,
 } from '@/services/data-freshness';
-import { getLearningProgress } from '@/services/country-instability';
-import { fetchCachedRiskScores } from '@/services/cached-risk-scores';
+import { getLearningProgress, type CountryScore } from '@/services/country-instability';
+import { fetchCachedRiskScores, toCountryScore, type CachedRiskScores } from '@/services/cached-risk-scores';
+import { getCachedPosture } from '@/services/cached-theater-posture';
+import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+
+type StrategicRiskDisplayLevel = 'critical' | 'high' | 'elevated' | 'normal' | 'low';
+type StrategicRiskDisplayBand = {
+  min: number;
+  levelKey: StrategicRiskDisplayLevel;
+  colorVar: string;
+};
+
+const STRATEGIC_RISK_BANDS: readonly StrategicRiskDisplayBand[] = [
+  { min: 81, levelKey: 'critical', colorVar: '--semantic-critical' },
+  { min: 66, levelKey: 'high', colorVar: '--semantic-high' },
+  { min: 51, levelKey: 'elevated', colorVar: '--semantic-elevated' },
+  { min: 31, levelKey: 'normal', colorVar: '--semantic-normal' },
+  { min: 0, levelKey: 'low', colorVar: '--semantic-low' },
+] as const;
 
 export class StrategicRiskPanel extends Panel {
   private overview: StrategicRiskOverview | null = null;
   private alerts: UnifiedAlert[] = [];
   private convergenceAlerts: GeoConvergenceAlert[] = [];
   private freshnessSummary: DataFreshnessSummary | null = null;
-  private refreshInterval: ReturnType<typeof setInterval> | null = null;
   private unsubscribeFreshness: (() => void) | null = null;
   private onLocationClick?: (lat: number, lon: number) => void;
   private usedCachedScores = false;
+  private breakingAlerts: Map<string, { threatLevel: 'critical' | 'high'; timestamp: number }> = new Map();
+  private boundOnBreaking: ((e: Event) => void) | null = null;
+  private breakingExpiryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     super({
@@ -54,58 +73,167 @@ export class StrategicRiskPanel extends Panel {
           this.refresh();
         }, 500);
       });
+
+      // Listen for breaking news events (dispatched on document)
+      this.boundOnBreaking = (e: Event) => {
+        const detail = (e as CustomEvent).detail;
+        if (!detail?.id) return;
+        const level = detail.threatLevel;
+        if (level !== 'critical' && level !== 'high') return;
+        this.breakingAlerts.set(detail.id, {
+          threatLevel: level,
+          timestamp: Date.now(),
+        });
+        this.refresh();
+      };
+      document.addEventListener('wm:breaking-news', this.boundOnBreaking);
+
       await this.refresh();
-      this.startAutoRefresh();
     } catch (error) {
       console.error('[StrategicRiskPanel] Init error:', error);
-      this.showError(t('common.failedRiskOverview'));
+      this.showError(t('common.failedRiskOverview'), () => void this.refresh());
     }
   }
 
-  private startAutoRefresh(): void {
-    this.refreshInterval = setInterval(() => this.refresh(), 5 * 60 * 1000);
-  }
+  private lastRiskFingerprint = '';
 
-  public async refresh(): Promise<void> {
+  public async refresh(): Promise<boolean> {
     this.freshnessSummary = dataFreshness.getSummary();
     this.convergenceAlerts = detectConvergence();
-    this.overview = calculateStrategicRiskOverview(this.convergenceAlerts);
-    this.alerts = getRecentAlerts(24);
 
-    // Try to get cached scores during learning mode
-    const { inLearning } = getLearningProgress();
-    this.usedCachedScores = false;
-    if (inLearning) {
-      const cached = await fetchCachedRiskScores(this.signal);
-      if (cached && cached.strategicRisk) {
-        this.usedCachedScores = true;
-        console.log('[StrategicRiskPanel] Using cached scores from backend');
+    // Prune stale breaking alerts (>30 min)
+    const BREAKING_TTL = 30 * 60 * 1000;
+    const now = Date.now();
+    const cutoff = now - BREAKING_TTL;
+    const staleIds: string[] = [];
+    for (const [id, entry] of this.breakingAlerts) {
+      if (entry.timestamp < cutoff) staleIds.push(id);
+    }
+    for (const id of staleIds) this.breakingAlerts.delete(id);
+
+    // Schedule next expiry-driven refresh
+    if (this.breakingExpiryTimer) clearTimeout(this.breakingExpiryTimer);
+    if (this.breakingAlerts.size > 0) {
+      let earliest = Infinity;
+      for (const entry of this.breakingAlerts.values()) {
+        if (entry.timestamp < earliest) earliest = entry.timestamp;
       }
+      const msUntilExpiry = (earliest + BREAKING_TTL) - now + 500;
+      this.breakingExpiryTimer = setTimeout(() => this.refresh(), Math.max(1000, msUntilExpiry));
     }
 
-    if (!this.freshnessSummary || this.freshnessSummary.activeSources === 0) {
+    // Severity-weighted score: critical=15, high=8
+    let breakingScore = 0;
+    for (const entry of this.breakingAlerts.values()) {
+      breakingScore += entry.threatLevel === 'critical' ? 15 : 8;
+    }
+    breakingScore = Math.min(15, breakingScore);
+
+    // Gather theater postures from cached service
+    const cachedPosture = getCachedPosture();
+    const postures = cachedPosture?.postures;
+    const staleFactor = cachedPosture?.stale ? 0.5 : 1;
+
+    // Prefer server/cached scores before calculating the overview so the
+    // cross-module alert baseline is not seeded from local CII on first refresh.
+    const { inLearning } = getLearningProgress();
+    this.usedCachedScores = false;
+    const cachedRiskScores = await fetchCachedRiskScores(this.signal);
+    if (!this.element?.isConnected) return false;
+
+    const localOverview = calculateStrategicRiskOverview(
+      this.convergenceAlerts,
+      postures ?? undefined,
+      breakingScore,
+      staleFactor
+    );
+    this.overview = localOverview;
+    this.alerts = getRecentAlerts(24);
+
+    if (cachedRiskScores?.strategicRisk) {
+      this.applyCachedRiskOverview(cachedRiskScores, localOverview);
+      this.usedCachedScores = true;
+      console.log('[StrategicRiskPanel] Using cached scores from backend');
+    } else if (inLearning || this.freshnessSummary.overallStatus === 'insufficient') {
+      console.log('[StrategicRiskPanel] Cached backend scores unavailable; using local fallback');
+    }
+
+    const badgeDetail = this.freshnessSummary
+      ? t('components.strategicRisk.sourcesDetail', {
+        active: this.freshnessSummary.activeSources,
+        total: this.freshnessSummary.totalSources,
+      })
+      : undefined;
+    if (this.usedCachedScores) {
+      this.setDataBadge('cached', badgeDetail);
+    } else if (!this.freshnessSummary || this.freshnessSummary.activeSources === 0) {
       this.setDataBadge('unavailable');
-    } else if (this.usedCachedScores) {
-      this.setDataBadge('cached');
     } else {
-      this.setDataBadge('live');
+      this.setDataBadge('live', badgeDetail);
     }
 
     this.render();
+
+    const alertIds = this.alerts.map(a => a.id).sort().join(',');
+    const fp = `${this.overview?.compositeScore}|${this.overview?.trend}|${alertIds}`;
+    const changed = fp !== this.lastRiskFingerprint;
+    this.lastRiskFingerprint = fp;
+    return changed;
+  }
+
+  private cachedTrendToOverviewTrend(trend: string): StrategicRiskOverview['trend'] {
+    if (trend === 'rising' || trend === 'escalating') return 'escalating';
+    if (trend === 'falling' || trend === 'de-escalating') return 'de-escalating';
+    return 'stable';
+  }
+
+  private cachedTimestamp(cached: CachedRiskScores): Date | null {
+    const raw = cached.strategicRisk.lastUpdated ?? cached.computedAt;
+    if (!raw) return null;
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  private cachedTopRisks(cached: CachedRiskScores, ciiScores: CountryScore[]): string[] {
+    const contributors = cached.strategicRisk.contributors
+      .filter((c) => c.score > 0)
+      .slice(0, 5)
+      .map((c) => `${c.country}: ${c.score} (${c.level})`);
+    if (contributors.length > 0) return contributors;
+    return ciiScores
+      .filter((s) => s.score > 0)
+      .slice(0, 5)
+      .map((s) => `${s.name}: ${s.score} (${s.level})`);
+  }
+
+  private applyCachedRiskOverview(cached: CachedRiskScores, localOverview: StrategicRiskOverview): void {
+    const ciiScores = cached.cii
+      .map(toCountryScore)
+      .sort((a, b) => b.score - a.score);
+
+    this.overview = {
+      ...localOverview,
+      avgCIIDeviation: ciiScores[0]?.score ?? cached.strategicRisk.score,
+      compositeScore: Math.max(0, Math.min(100, Math.round(cached.strategicRisk.score))),
+      trend: this.cachedTrendToOverviewTrend(cached.strategicRisk.trend),
+      topRisks: this.cachedTopRisks(cached, ciiScores),
+      unstableCountries: ciiScores.filter(s => s.score >= 50).slice(0, 5),
+      timestamp: this.cachedTimestamp(cached),
+      degraded: cached.degraded,
+      stale: cached.stale,
+    };
   }
 
   private getScoreColor(score: number): string {
-    if (score >= 70) return getCSSColor('--semantic-critical');
-    if (score >= 50) return getCSSColor('--semantic-high');
-    if (score >= 30) return getCSSColor('--semantic-elevated');
-    return getCSSColor('--semantic-normal');
+    return getCSSColor(this.getFallbackScoreBand(score).colorVar);
   }
 
   private getScoreLevel(score: number): string {
-    if (score >= 70) return t('components.strategicRisk.levels.critical');
-    if (score >= 50) return t('components.strategicRisk.levels.elevated');
-    if (score >= 30) return t('components.strategicRisk.levels.moderate');
-    return t('components.strategicRisk.levels.low');
+    return t(`countryBrief.levels.${this.getFallbackScoreBand(score).levelKey}`);
+  }
+
+  private getFallbackScoreBand(score: number): typeof STRATEGIC_RISK_BANDS[number] {
+    return STRATEGIC_RISK_BANDS.find((band) => score >= band.min) ?? STRATEGIC_RISK_BANDS[STRATEGIC_RISK_BANDS.length - 1]!;
   }
 
   private getTrendEmoji(trend: string): string {
@@ -148,6 +276,8 @@ export class StrategicRiskPanel extends Panel {
       case 'convergence': return '🎯';
       case 'cii_spike': return '📊';
       case 'cascade': return '🔗';
+      case 'sanctions': return '🚫';
+      case 'radiation': return '☢️';
       case 'composite': return '⚠️';
       default: return '📍';
     }
@@ -223,10 +353,12 @@ export class StrategicRiskPanel extends Panel {
           </div>
         </div>`
       : '';
+    const cacheStateBanner = this.renderCachedRiskStateBanner();
 
     return `
       <div class="strategic-risk-panel">
         ${statusBanner}
+        ${cacheStateBanner}
 
         <div class="risk-gauge">
           <div class="risk-score-container">
@@ -246,15 +378,28 @@ export class StrategicRiskPanel extends Panel {
         </div>
 
         ${this.renderMetrics()}
+        ${this.renderFreshnessSurface()}
         ${this.renderTopRisks()}
         ${this.renderRecentAlerts()}
 
         <div class="risk-footer">
-          <span class="risk-updated">${t('components.strategicRisk.updated', { time: this.overview.timestamp.toLocaleTimeString() })}</span>
+          <span class="risk-updated">${t('components.strategicRisk.updated', { time: this.formatOverviewTimestamp() })}</span>
           <button class="risk-refresh-btn">${t('components.strategicRisk.refresh')}</button>
         </div>
       </div>
     `;
+  }
+
+  private renderCachedRiskStateBanner(): string {
+    if (!this.overview || (!this.overview.degraded && !this.overview.stale)) return '';
+    const labels = [
+      this.overview.degraded ? t('components.strategicRisk.sourceStates.degraded') : '',
+      this.overview.stale ? t('components.strategicRisk.sourceStates.stale') : '',
+    ].filter(Boolean);
+    return `<div class="risk-status-banner risk-status-cached">
+      <span class="risk-status-icon">!</span>
+      <span class="risk-status-text">${t('components.strategicRisk.cachedCiiStatus', { states: labels.join(' · ') })}</span>
+    </div>`;
   }
 
   private renderSourceRow(source: DataSourceState): string {
@@ -271,6 +416,33 @@ export class StrategicRiskPanel extends Panel {
         ${panelId && (source.status === 'no_data' || source.status === 'disabled') ? `
           <button class="risk-source-enable" data-panel="${panelId}">${t('components.strategicRisk.enable')}</button>
         ` : ''}
+      </div>
+    `;
+  }
+
+  private renderFreshnessSurface(): string {
+    if (!this.freshnessSummary) return '';
+    const sources = dataFreshness.getAllSources()
+      .filter(source => source.status !== 'no_data' && source.status !== 'disabled')
+      .sort((a, b) => {
+        const order: Record<string, number> = { error: 0, very_stale: 1, stale: 2, fresh: 3 };
+        return (order[a.status] ?? 4) - (order[b.status] ?? 4);
+      })
+      .slice(0, 6);
+
+    if (sources.length === 0) return '';
+    return `
+      <div class="risk-section">
+        <div class="risk-section-title">${t('components.strategicRisk.dataFreshness')}</div>
+        <div class="risk-sources-compact">
+          ${sources.map(source => `
+            <span class="risk-source-chip" title="${escapeHtml(source.healthStatus || source.status)}" style="border-color: ${getStatusColor(source.status)}">
+              <span class="risk-source-dot" style="color: ${getStatusColor(source.status)}">${getStatusIcon(source.status)}</span>
+              <span class="risk-source-name">${escapeHtml(source.name)}</span>
+              <span class="risk-source-time">${escapeHtml(dataFreshness.getTimeSince(source.id))}</span>
+            </span>
+          `).join('')}
+        </div>
       </div>
     `;
   }
@@ -350,7 +522,7 @@ export class StrategicRiskPanel extends Panel {
         <div class="risk-section-title">${t('components.strategicRisk.recentAlerts', { count: String(this.alerts.length) })}</div>
         <div class="risk-alerts">
           ${displayAlerts.map(alert => {
-      const hasLocation = alert.location && alert.location.lat && alert.location.lon;
+      const hasLocation = alert.location?.lat && alert.location.lon;
       const clickableClass = hasLocation ? 'risk-alert-clickable' : '';
       const locationAttrs = hasLocation
         ? `data-lat="${alert.location!.lat}" data-lon="${alert.location!.lon}"`
@@ -386,26 +558,33 @@ export class StrategicRiskPanel extends Panel {
     return date.toLocaleDateString();
   }
 
+  private formatOverviewTimestamp(): string {
+    return this.overview?.timestamp ? this.overview.timestamp.toLocaleTimeString() : '&mdash;';
+  }
+
   private render(): void {
     this.freshnessSummary = dataFreshness.getSummary();
 
-    if (!this.overview) {
-      this.showLoading();
-      return;
-    }
+    try {
+      if (!this.overview) {
+        this.showLoading();
+        return;
+      }
 
-    // Render full data view — partial data is handled gracefully by CII baselines
-    // Only show insufficient state if zero sources after 60s (true failure)
-    let html: string;
-    const uptime = performance.now();
-    if (this.freshnessSummary.overallStatus === 'insufficient' && uptime > 60_000) {
-      html = this.renderInsufficientData();
-    } else {
-      html = this.renderFullData();
-    }
+      // Render full data view — partial data is handled gracefully by CII baselines
+      // Only show insufficient state if zero sources after 60s (true failure)
+      const uptime = performance.now();
+      const html =
+        this.freshnessSummary.overallStatus === 'insufficient' && uptime > 60_000 && !this.usedCachedScores
+          ? this.renderInsufficientData()
+          : this.renderFullData();
 
-    this.content.innerHTML = html;
-    this.attachEventListeners();
+      setTrustedHtml(this.content, trustedHtml(html, "legacy direct innerHTML migration"));
+      this.attachEventListeners();
+    } catch (e: unknown) {
+      console.error('[StrategicRiskPanel] Render error:', e);
+      this.showError(t('common.failedRiskOverview'), () => this.refresh());
+    }
   }
 
   private attachEventListeners(): void {
@@ -445,7 +624,7 @@ export class StrategicRiskPanel extends Panel {
       item.addEventListener('click', () => {
         const lat = parseFloat((item as HTMLElement).dataset.lat || '0');
         const lon = parseFloat((item as HTMLElement).dataset.lon || '0');
-        if (this.onLocationClick && !isNaN(lat) && !isNaN(lon)) {
+        if (this.onLocationClick && !Number.isNaN(lat) && !Number.isNaN(lon)) {
           this.onLocationClick(lat, lon);
         }
       });
@@ -457,7 +636,7 @@ export class StrategicRiskPanel extends Panel {
       alert.addEventListener('click', () => {
         const lat = parseFloat((alert as HTMLElement).dataset.lat || '0');
         const lon = parseFloat((alert as HTMLElement).dataset.lon || '0');
-        if (this.onLocationClick && !isNaN(lat) && !isNaN(lon)) {
+        if (this.onLocationClick && !Number.isNaN(lat) && !Number.isNaN(lon)) {
           this.onLocationClick(lat, lon);
         }
       });
@@ -473,8 +652,13 @@ export class StrategicRiskPanel extends Panel {
   }
 
   public destroy(): void {
-    if (this.refreshInterval) {
-      clearInterval(this.refreshInterval);
+    if (this.boundOnBreaking) {
+      document.removeEventListener('wm:breaking-news', this.boundOnBreaking);
+      this.boundOnBreaking = null;
+    }
+    if (this.breakingExpiryTimer) {
+      clearTimeout(this.breakingExpiryTimer);
+      this.breakingExpiryTimer = null;
     }
     if (this.unsubscribeFreshness) {
       this.unsubscribeFreshness();

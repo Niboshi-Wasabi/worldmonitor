@@ -2,17 +2,12 @@
 // source: worldmonitor/maritime/v1/service.proto
 
 export interface GetVesselSnapshotRequest {
-  boundingBox?: BoundingBox;
-}
-
-export interface BoundingBox {
-  northEast?: GeoCoordinates;
-  southWest?: GeoCoordinates;
-}
-
-export interface GeoCoordinates {
-  latitude: number;
-  longitude: number;
+  neLat: number;
+  neLon: number;
+  swLat: number;
+  swLon: number;
+  includeCandidates: boolean;
+  includeTankers: boolean;
 }
 
 export interface GetVesselSnapshotResponse {
@@ -23,6 +18,10 @@ export interface VesselSnapshot {
   snapshotAt: number;
   densityZones: AisDensityZone[];
   disruptions: AisDisruption[];
+  sequence: number;
+  status?: AisSnapshotStatus;
+  candidateReports: SnapshotCandidateReport[];
+  tankerReports: SnapshotCandidateReport[];
 }
 
 export interface AisDensityZone {
@@ -33,6 +32,11 @@ export interface AisDensityZone {
   deltaPct: number;
   shipsPerDay: number;
   note: string;
+}
+
+export interface GeoCoordinates {
+  latitude: number;
+  longitude: number;
 }
 
 export interface AisDisruption {
@@ -49,14 +53,28 @@ export interface AisDisruption {
   description: string;
 }
 
-export interface ListNavigationalWarningsRequest {
-  pagination?: PaginationRequest;
-  area: string;
+export interface AisSnapshotStatus {
+  connected: boolean;
+  vessels: number;
+  messages: number;
 }
 
-export interface PaginationRequest {
+export interface SnapshotCandidateReport {
+  mmsi: string;
+  name: string;
+  lat: number;
+  lon: number;
+  shipType: number;
+  heading: number;
+  speed: number;
+  course: number;
+  timestamp: number;
+}
+
+export interface ListNavigationalWarningsRequest {
   pageSize: number;
   cursor: string;
+  area: string;
 }
 
 export interface ListNavigationalWarningsResponse {
@@ -134,7 +152,14 @@ export class MaritimeServiceClient {
 
   async getVesselSnapshot(req: GetVesselSnapshotRequest, options?: MaritimeServiceCallOptions): Promise<GetVesselSnapshotResponse> {
     let path = "/api/maritime/v1/get-vessel-snapshot";
-    const url = this.baseURL + path;
+    const params = new URLSearchParams();
+    if (req.neLat != null && req.neLat !== 0) params.set("ne_lat", String(req.neLat));
+    if (req.neLon != null && req.neLon !== 0) params.set("ne_lon", String(req.neLon));
+    if (req.swLat != null && req.swLat !== 0) params.set("sw_lat", String(req.swLat));
+    if (req.swLon != null && req.swLon !== 0) params.set("sw_lon", String(req.swLon));
+    if (req.includeCandidates) params.set("include_candidates", String(req.includeCandidates));
+    if (req.includeTankers) params.set("include_tankers", String(req.includeTankers));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -143,9 +168,8 @@ export class MaritimeServiceClient {
     };
 
     const resp = await this.fetchFn(url, {
-      method: "POST",
+      method: "GET",
       headers,
-      body: JSON.stringify(req),
       signal: options?.signal,
     });
 
@@ -158,7 +182,11 @@ export class MaritimeServiceClient {
 
   async listNavigationalWarnings(req: ListNavigationalWarningsRequest, options?: MaritimeServiceCallOptions): Promise<ListNavigationalWarningsResponse> {
     let path = "/api/maritime/v1/list-navigational-warnings";
-    const url = this.baseURL + path;
+    const params = new URLSearchParams();
+    if (req.pageSize != null && req.pageSize !== 0) params.set("page_size", String(req.pageSize));
+    if (req.cursor != null && req.cursor !== "") params.set("cursor", String(req.cursor));
+    if (req.area != null && req.area !== "") params.set("area", String(req.area));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -167,9 +195,8 @@ export class MaritimeServiceClient {
     };
 
     const resp = await this.fetchFn(url, {
-      method: "POST",
+      method: "GET",
       headers,
-      body: JSON.stringify(req),
       signal: options?.signal,
     });
 

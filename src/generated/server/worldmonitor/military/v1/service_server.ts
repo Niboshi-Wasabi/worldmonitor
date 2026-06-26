@@ -2,25 +2,14 @@
 // source: worldmonitor/military/v1/service.proto
 
 export interface ListMilitaryFlightsRequest {
-  pagination?: PaginationRequest;
-  boundingBox?: BoundingBox;
-  operator: MilitaryOperator;
-  aircraftType: MilitaryAircraftType;
-}
-
-export interface PaginationRequest {
   pageSize: number;
   cursor: string;
-}
-
-export interface BoundingBox {
-  northEast?: GeoCoordinates;
-  southWest?: GeoCoordinates;
-}
-
-export interface GeoCoordinates {
-  latitude: number;
-  longitude: number;
+  neLat: number;
+  neLon: number;
+  swLat: number;
+  swLon: number;
+  operator: MilitaryOperator;
+  aircraftType: MilitaryAircraftType;
 }
 
 export interface ListMilitaryFlightsResponse {
@@ -53,6 +42,11 @@ export interface MilitaryFlight {
   isInteresting: boolean;
   note: string;
   enrichment?: FlightEnrichment;
+}
+
+export interface GeoCoordinates {
+  latitude: number;
+  longitude: number;
 }
 
 export interface FlightEnrichment {
@@ -194,6 +188,113 @@ export interface USNIStrikeGroup {
   escorts: string[];
 }
 
+export interface ListMilitaryBasesRequest {
+  neLat: number;
+  neLon: number;
+  swLat: number;
+  swLon: number;
+  zoom: number;
+  type: string;
+  kind: string;
+  country: string;
+}
+
+export interface ListMilitaryBasesResponse {
+  bases: MilitaryBaseEntry[];
+  clusters: MilitaryBaseCluster[];
+  totalInView: number;
+  truncated: boolean;
+}
+
+export interface MilitaryBaseEntry {
+  id: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+  kind: string;
+  countryIso2: string;
+  type: string;
+  tier: number;
+  catAirforce: boolean;
+  catNaval: boolean;
+  catNuclear: boolean;
+  catSpace: boolean;
+  catTraining: boolean;
+  branch: string;
+  status: string;
+}
+
+export interface MilitaryBaseCluster {
+  latitude: number;
+  longitude: number;
+  count: number;
+  dominantType: string;
+  expansionZoom: number;
+}
+
+export interface GetWingbitsLiveFlightRequest {
+  icao24: string;
+}
+
+export interface GetWingbitsLiveFlightResponse {
+  flight?: WingbitsLiveFlight;
+}
+
+export interface WingbitsLiveFlight {
+  icao24: string;
+  callsign: string;
+  lat: number;
+  lon: number;
+  altitude: number;
+  speed: number;
+  heading: number;
+  verticalRate: number;
+  registration: string;
+  model: string;
+  operator: string;
+  onGround: boolean;
+  lastSeen: string;
+  depIata: string;
+  arrIata: string;
+  depTimeUtc: string;
+  arrTimeUtc: string;
+  depEstimatedUtc: string;
+  arrEstimatedUtc: string;
+  depDelayedMin: number;
+  arrDelayedMin: number;
+  flightStatus: string;
+  flightDurationMin: number;
+  arrTerminal: string;
+  photoUrl: string;
+  photoLink: string;
+  photoCredit: string;
+  callsignIata: string;
+  airlineName: string;
+}
+
+export interface ListDefensePatentsRequest {
+  cpcCode: string;
+  assignee: string;
+  limit: number;
+}
+
+export interface ListDefensePatentsResponse {
+  patents: DefensePatentFiling[];
+  total: number;
+  fetchedAt: string;
+}
+
+export interface DefensePatentFiling {
+  patentId: string;
+  title: string;
+  date: string;
+  assignee: string;
+  cpcCode: string;
+  cpcDesc: string;
+  abstract: string;
+  url: string;
+}
+
 export type MilitaryActivityType = "MILITARY_ACTIVITY_TYPE_UNSPECIFIED" | "MILITARY_ACTIVITY_TYPE_EXERCISE" | "MILITARY_ACTIVITY_TYPE_PATROL" | "MILITARY_ACTIVITY_TYPE_TRANSPORT" | "MILITARY_ACTIVITY_TYPE_DEPLOYMENT" | "MILITARY_ACTIVITY_TYPE_TRANSIT" | "MILITARY_ACTIVITY_TYPE_UNKNOWN";
 
 export type MilitaryAircraftType = "MILITARY_AIRCRAFT_TYPE_UNSPECIFIED" | "MILITARY_AIRCRAFT_TYPE_FIGHTER" | "MILITARY_AIRCRAFT_TYPE_BOMBER" | "MILITARY_AIRCRAFT_TYPE_TRANSPORT" | "MILITARY_AIRCRAFT_TYPE_TANKER" | "MILITARY_AIRCRAFT_TYPE_AWACS" | "MILITARY_AIRCRAFT_TYPE_RECONNAISSANCE" | "MILITARY_AIRCRAFT_TYPE_HELICOPTER" | "MILITARY_AIRCRAFT_TYPE_DRONE" | "MILITARY_AIRCRAFT_TYPE_PATROL" | "MILITARY_AIRCRAFT_TYPE_SPECIAL_OPS" | "MILITARY_AIRCRAFT_TYPE_VIP" | "MILITARY_AIRCRAFT_TYPE_UNKNOWN";
@@ -253,6 +354,9 @@ export interface MilitaryServiceHandler {
   getAircraftDetailsBatch(ctx: ServerContext, req: GetAircraftDetailsBatchRequest): Promise<GetAircraftDetailsBatchResponse>;
   getWingbitsStatus(ctx: ServerContext, req: GetWingbitsStatusRequest): Promise<GetWingbitsStatusResponse>;
   getUSNIFleetReport(ctx: ServerContext, req: GetUSNIFleetReportRequest): Promise<GetUSNIFleetReportResponse>;
+  listMilitaryBases(ctx: ServerContext, req: ListMilitaryBasesRequest): Promise<ListMilitaryBasesResponse>;
+  getWingbitsLiveFlight(ctx: ServerContext, req: GetWingbitsLiveFlightRequest): Promise<GetWingbitsLiveFlightResponse>;
+  listDefensePatents(ctx: ServerContext, req: ListDefensePatentsRequest): Promise<ListDefensePatentsResponse>;
 }
 
 export function createMilitaryServiceRoutes(
@@ -261,12 +365,23 @@ export function createMilitaryServiceRoutes(
 ): RouteDescriptor[] {
   return [
     {
-      method: "POST",
+      method: "GET",
       path: "/api/military/v1/list-military-flights",
       handler: async (req: Request): Promise<Response> => {
         try {
           const pathParams: Record<string, string> = {};
-          const body = await req.json() as ListMilitaryFlightsRequest;
+          const url = new URL(req.url, "http://localhost");
+          const params = url.searchParams;
+          const body: ListMilitaryFlightsRequest = {
+            pageSize: Number(params.get("page_size") ?? "0"),
+            cursor: params.get("cursor") ?? "",
+            neLat: Number(params.get("ne_lat") ?? "0"),
+            neLon: Number(params.get("ne_lon") ?? "0"),
+            swLat: Number(params.get("sw_lat") ?? "0"),
+            swLon: Number(params.get("sw_lon") ?? "0"),
+            operator: (params.get("operator") ?? "MILITARY_OPERATOR_UNSPECIFIED") as MilitaryOperator,
+            aircraftType: (params.get("aircraft_type") ?? "MILITARY_AIRCRAFT_TYPE_UNSPECIFIED") as MilitaryAircraftType,
+          };
           if (options?.validateRequest) {
             const bodyViolations = options.validateRequest("listMilitaryFlights", body);
             if (bodyViolations) {
@@ -304,12 +419,16 @@ export function createMilitaryServiceRoutes(
       },
     },
     {
-      method: "POST",
+      method: "GET",
       path: "/api/military/v1/get-theater-posture",
       handler: async (req: Request): Promise<Response> => {
         try {
           const pathParams: Record<string, string> = {};
-          const body = await req.json() as GetTheaterPostureRequest;
+          const url = new URL(req.url, "http://localhost");
+          const params = url.searchParams;
+          const body: GetTheaterPostureRequest = {
+            theater: params.get("theater") ?? "",
+          };
           if (options?.validateRequest) {
             const bodyViolations = options.validateRequest("getTheaterPosture", body);
             if (bodyViolations) {
@@ -347,12 +466,16 @@ export function createMilitaryServiceRoutes(
       },
     },
     {
-      method: "POST",
+      method: "GET",
       path: "/api/military/v1/get-aircraft-details",
       handler: async (req: Request): Promise<Response> => {
         try {
           const pathParams: Record<string, string> = {};
-          const body = await req.json() as GetAircraftDetailsRequest;
+          const url = new URL(req.url, "http://localhost");
+          const params = url.searchParams;
+          const body: GetAircraftDetailsRequest = {
+            icao24: params.get("icao24") ?? "",
+          };
           if (options?.validateRequest) {
             const bodyViolations = options.validateRequest("getAircraftDetails", body);
             if (bodyViolations) {
@@ -433,18 +556,12 @@ export function createMilitaryServiceRoutes(
       },
     },
     {
-      method: "POST",
+      method: "GET",
       path: "/api/military/v1/get-wingbits-status",
       handler: async (req: Request): Promise<Response> => {
         try {
           const pathParams: Record<string, string> = {};
-          const body = await req.json() as GetWingbitsStatusRequest;
-          if (options?.validateRequest) {
-            const bodyViolations = options.validateRequest("getWingbitsStatus", body);
-            if (bodyViolations) {
-              throw new ValidationError(bodyViolations);
-            }
-          }
+          const body = {} as GetWingbitsStatusRequest;
 
           const ctx: ServerContext = {
             request: req,
@@ -476,12 +593,16 @@ export function createMilitaryServiceRoutes(
       },
     },
     {
-      method: "POST",
+      method: "GET",
       path: "/api/military/v1/get-usni-fleet-report",
       handler: async (req: Request): Promise<Response> => {
         try {
           const pathParams: Record<string, string> = {};
-          const body = await req.json() as GetUSNIFleetReportRequest;
+          const url = new URL(req.url, "http://localhost");
+          const params = url.searchParams;
+          const body: GetUSNIFleetReportRequest = {
+            forceRefresh: params.get("force_refresh") === "true",
+          };
           if (options?.validateRequest) {
             const bodyViolations = options.validateRequest("getUSNIFleetReport", body);
             if (bodyViolations) {
@@ -497,6 +618,156 @@ export function createMilitaryServiceRoutes(
 
           const result = await handler.getUSNIFleetReport(ctx, body);
           return new Response(JSON.stringify(result as GetUSNIFleetReportResponse), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        } catch (err: unknown) {
+          if (err instanceof ValidationError) {
+            return new Response(JSON.stringify({ violations: err.violations }), {
+              status: 400,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (options?.onError) {
+            return options.onError(err, req);
+          }
+          const message = err instanceof Error ? err.message : String(err);
+          return new Response(JSON.stringify({ message }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+      },
+    },
+    {
+      method: "GET",
+      path: "/api/military/v1/list-military-bases",
+      handler: async (req: Request): Promise<Response> => {
+        try {
+          const pathParams: Record<string, string> = {};
+          const url = new URL(req.url, "http://localhost");
+          const params = url.searchParams;
+          const body: ListMilitaryBasesRequest = {
+            neLat: Number(params.get("ne_lat") ?? "0"),
+            neLon: Number(params.get("ne_lon") ?? "0"),
+            swLat: Number(params.get("sw_lat") ?? "0"),
+            swLon: Number(params.get("sw_lon") ?? "0"),
+            zoom: Number(params.get("zoom") ?? "0"),
+            type: params.get("type") ?? "",
+            kind: params.get("kind") ?? "",
+            country: params.get("country") ?? "",
+          };
+          if (options?.validateRequest) {
+            const bodyViolations = options.validateRequest("listMilitaryBases", body);
+            if (bodyViolations) {
+              throw new ValidationError(bodyViolations);
+            }
+          }
+
+          const ctx: ServerContext = {
+            request: req,
+            pathParams,
+            headers: Object.fromEntries(req.headers.entries()),
+          };
+
+          const result = await handler.listMilitaryBases(ctx, body);
+          return new Response(JSON.stringify(result as ListMilitaryBasesResponse), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        } catch (err: unknown) {
+          if (err instanceof ValidationError) {
+            return new Response(JSON.stringify({ violations: err.violations }), {
+              status: 400,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (options?.onError) {
+            return options.onError(err, req);
+          }
+          const message = err instanceof Error ? err.message : String(err);
+          return new Response(JSON.stringify({ message }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+      },
+    },
+    {
+      method: "GET",
+      path: "/api/military/v1/get-wingbits-live-flight",
+      handler: async (req: Request): Promise<Response> => {
+        try {
+          const pathParams: Record<string, string> = {};
+          const url = new URL(req.url, "http://localhost");
+          const params = url.searchParams;
+          const body: GetWingbitsLiveFlightRequest = {
+            icao24: params.get("icao24") ?? "",
+          };
+          if (options?.validateRequest) {
+            const bodyViolations = options.validateRequest("getWingbitsLiveFlight", body);
+            if (bodyViolations) {
+              throw new ValidationError(bodyViolations);
+            }
+          }
+
+          const ctx: ServerContext = {
+            request: req,
+            pathParams,
+            headers: Object.fromEntries(req.headers.entries()),
+          };
+
+          const result = await handler.getWingbitsLiveFlight(ctx, body);
+          return new Response(JSON.stringify(result as GetWingbitsLiveFlightResponse), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        } catch (err: unknown) {
+          if (err instanceof ValidationError) {
+            return new Response(JSON.stringify({ violations: err.violations }), {
+              status: 400,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (options?.onError) {
+            return options.onError(err, req);
+          }
+          const message = err instanceof Error ? err.message : String(err);
+          return new Response(JSON.stringify({ message }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+      },
+    },
+    {
+      method: "GET",
+      path: "/api/military/v1/list-defense-patents",
+      handler: async (req: Request): Promise<Response> => {
+        try {
+          const pathParams: Record<string, string> = {};
+          const url = new URL(req.url, "http://localhost");
+          const params = url.searchParams;
+          const body: ListDefensePatentsRequest = {
+            cpcCode: params.get("cpc_code") ?? "",
+            assignee: params.get("assignee") ?? "",
+            limit: Number(params.get("limit") ?? "0"),
+          };
+          if (options?.validateRequest) {
+            const bodyViolations = options.validateRequest("listDefensePatents", body);
+            if (bodyViolations) {
+              throw new ValidationError(bodyViolations);
+            }
+          }
+
+          const ctx: ServerContext = {
+            request: req,
+            pathParams,
+            headers: Object.fromEntries(req.headers.entries()),
+          };
+
+          const result = await handler.listDefensePatents(ctx, body);
+          return new Response(JSON.stringify(result as ListDefensePatentsResponse), {
             status: 200,
             headers: { "Content-Type": "application/json" },
           });

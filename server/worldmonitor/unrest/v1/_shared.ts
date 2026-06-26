@@ -1,5 +1,3 @@
-declare const process: { env: Record<string, string | undefined> };
-
 import type {
   UnrestEvent,
   UnrestEventType,
@@ -10,7 +8,6 @@ import type {
 // API URLs
 // ========================================================================
 
-export const ACLED_API_URL = 'https://acleddata.com/api/acled/read';
 export const GDELT_GEO_URL = 'https://api.gdeltproject.org/api/v2/geo/geo';
 
 // ========================================================================
@@ -67,6 +64,14 @@ export function classifyGdeltEventType(name: string): UnrestEventType {
 // Deduplication (ported from src/services/protests.ts lines 226-258)
 // ========================================================================
 
+const MAX_SOURCE_URLS = 5;
+
+export function mergeSourceUrls(...groups: Array<string[] | undefined>): string[] {
+  return [
+    ...new Set(groups.flatMap((group) => group ?? []).filter((url): url is string => typeof url === 'string' && url.length > 0)),
+  ].slice(0, MAX_SOURCE_URLS);
+}
+
 export function deduplicateEvents(events: UnrestEvent[]): UnrestEvent[] {
   const unique = new Map<string, UnrestEvent>();
 
@@ -80,6 +85,7 @@ export function deduplicateEvents(events: UnrestEvent[]): UnrestEvent[] {
 
     const existing = unique.get(key);
     if (!existing) {
+      event.sourceUrls = mergeSourceUrls(event.sourceUrls);
       unique.set(key, event);
     } else {
       // Merge: prefer ACLED (higher confidence), combine sources
@@ -88,12 +94,15 @@ export function deduplicateEvents(events: UnrestEvent[]): UnrestEvent[] {
         existing.sourceType !== 'UNREST_SOURCE_TYPE_ACLED'
       ) {
         event.sources = [...new Set([...event.sources, ...existing.sources])];
+        event.sourceUrls = mergeSourceUrls(event.sourceUrls, existing.sourceUrls);
         unique.set(key, event);
       } else if (existing.sourceType === 'UNREST_SOURCE_TYPE_ACLED') {
         existing.sources = [...new Set([...existing.sources, ...event.sources])];
+        existing.sourceUrls = mergeSourceUrls(existing.sourceUrls, event.sourceUrls);
       } else {
         // Both GDELT: combine sources, upgrade confidence if 2+ sources
         existing.sources = [...new Set([...existing.sources, ...event.sources])];
+        existing.sourceUrls = mergeSourceUrls(existing.sourceUrls, event.sourceUrls);
         if (existing.sources.length >= 2) {
           existing.confidence = 'CONFIDENCE_LEVEL_HIGH';
         }
@@ -123,4 +132,3 @@ export function sortBySeverityAndRecency(events: UnrestEvent[]): UnrestEvent[] {
     return b.occurredAt - a.occurredAt;
   });
 }
-

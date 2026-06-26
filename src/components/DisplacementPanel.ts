@@ -1,8 +1,13 @@
 import { Panel } from './Panel';
-import { escapeHtml } from '@/utils/sanitize';
+import { escapeHtml, unsafeRawHtml } from '@/utils/sanitize';
 import type { UnhcrSummary, CountryDisplacement } from '@/services/displacement';
 import { formatPopulation } from '@/services/displacement';
 import { t } from '@/services/i18n';
+import { renderFollowedOnlyChip, type FollowedOnlyChipHandle } from '@/utils/followed-only-chip';
+import { isFollowed, subscribe as subscribeFollowed } from '@/services/followed-countries';
+import { toIso2 } from '@/utils/country-codes';
+import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+
 
 type DisplacementTab = 'origins' | 'hosts';
 
@@ -10,6 +15,10 @@ export class DisplacementPanel extends Panel {
   private data: UnhcrSummary | null = null;
   private activeTab: DisplacementTab = 'origins';
   private onCountryClick?: (lat: number, lon: number) => void;
+  private followedOnlyChip: FollowedOnlyChipHandle | null = null;
+  private followedOnlyHost: HTMLElement | null = null;
+  private followedOnlyTeardown: (() => void) | null = null;
+  private followedUnsub: (() => void) | null = null;
 
   constructor() {
     super({
@@ -18,8 +27,55 @@ export class DisplacementPanel extends Panel {
       showCount: true,
       trackActivity: true,
       infoTooltip: t('components.displacement.infoTooltip'),
+      defaultRowSpan: 2,
     });
     this.showLoading(t('common.loadingDisplacement'));
+
+    this.content.addEventListener('click', (e) => {
+      const tab = (e.target as HTMLElement).closest<HTMLElement>('.panel-tab');
+      if (tab?.dataset.tab) {
+        this.activeTab = tab.dataset.tab as DisplacementTab;
+        this.renderContent();
+        return;
+      }
+      const row = (e.target as HTMLElement).closest<HTMLElement>('.disp-row');
+      if (row) {
+        const lat = Number(row.dataset.lat);
+        const lon = Number(row.dataset.lon);
+        if (Number.isFinite(lat) && Number.isFinite(lon)) this.onCountryClick?.(lat, lon);
+      }
+    });
+    this.mountFollowedOnlyChip();
+  }
+
+  private mountFollowedOnlyChip(): void {
+    const host = document.createElement('span');
+    host.className = 'panel-header-followed-only-host';
+    this.followedOnlyHost = host;
+    this.followedOnlyChip = renderFollowedOnlyChip({
+      panelId: 'displacement',
+      onChange: () => {
+        if (this.data) this.renderContent();
+      },
+    });
+    if (this.followedOnlyChip.html === '') return;
+    setTrustedHtml(host, trustedHtml(this.followedOnlyChip.html, "legacy direct innerHTML migration"));
+    // Insert BEFORE the close button so close stays rightmost. The Panel
+    // base appends `.panel-close-btn` first; a plain `appendChild` would
+    // land the chip after close and break the user expectation that X
+    // is always the last header control.
+    const closeBtn = this.header.querySelector('.panel-close-btn');
+    if (closeBtn) {
+      this.header.insertBefore(host, closeBtn);
+    } else {
+      this.header.appendChild(host);
+    }
+    this.followedOnlyTeardown = this.followedOnlyChip.attach(host);
+    // Re-filter on external watchlist change so a follow/unfollow from
+    // another surface refreshes the displacement table immediately.
+    this.followedUnsub = subscribeFollowed(() => {
+      if (this.data) this.renderContent();
+    });
   }
 
   public setCountryClickHandler(handler: (lat: number, lon: number) => void): void {
@@ -28,7 +84,7 @@ export class DisplacementPanel extends Panel {
 
   public setData(data: UnhcrSummary): void {
     this.data = data;
-    this.setCount(data.countries.length);
+    this.setCount(data.countries?.length ?? 0);
     this.renderContent();
   }
 
@@ -52,9 +108,9 @@ export class DisplacementPanel extends Panel {
     ).join('');
 
     const tabsHtml = `
-      <div class="disp-tabs">
-        <button class="disp-tab ${this.activeTab === 'origins' ? 'disp-tab-active' : ''}" data-tab="origins">${t('components.displacement.origins')}</button>
-        <button class="disp-tab ${this.activeTab === 'hosts' ? 'disp-tab-active' : ''}" data-tab="hosts">${t('components.displacement.hosts')}</button>
+      <div class="panel-tabs" role="tablist" aria-label="Displacement data view">
+        <button class="panel-tab ${this.activeTab === 'origins' ? 'active' : ''}" data-tab="origins" role="tab" aria-selected="${this.activeTab === 'origins'}" id="disp-tab-origins" aria-controls="disp-tab-panel">${t('components.displacement.origins')}</button>
+        <button class="panel-tab ${this.activeTab === 'hosts' ? 'active' : ''}" data-tab="hosts" role="tab" aria-selected="${this.activeTab === 'hosts'}" id="disp-tab-hosts" aria-controls="disp-tab-panel">${t('components.displacement.hosts')}</button>
       </div>
     `;
 
@@ -69,11 +125,26 @@ export class DisplacementPanel extends Panel {
         .sort((a, b) => (b.hostTotal || 0) - (a.hostTotal || 0));
     }
 
+    // U7 — "Followed only" filter chip. When active, drop rows whose
+    // country code is not in the user's watchlist. Items without a
+    // resolvable ISO-2 are dropped (we can't prove they belong to a
+    // followed country).
+    const followedOnlyActive = this.followedOnlyChip?.isActive() === true;
+    if (followedOnlyActive) {
+      countries = countries.filter(c => {
+        const code = toIso2(c.code ?? '');
+        return code ? isFollowed(code) : false;
+      });
+    }
+
     const displayed = countries.slice(0, 30);
     let tableHtml: string;
 
     if (displayed.length === 0) {
-      tableHtml = `<div class="panel-empty">${t('common.noDataShort')}</div>`;
+      const emptyMsg = followedOnlyActive
+        ? 'No items in your followed countries. Add countries by tapping the star, or turn off this filter.'
+        : t('common.noDataShort');
+      tableHtml = `<div class="panel-empty">${escapeHtml(emptyMsg)}</div>`;
     } else {
       const rows = displayed.map(c => {
         const hostTotal = c.hostTotal || 0;
@@ -111,27 +182,39 @@ export class DisplacementPanel extends Panel {
         </table>`;
     }
 
-    this.setContent(`
+    this.setSafeContent(unsafeRawHtml(`
       <div class="disp-panel-content">
         <div class="disp-stats-grid">${statsHtml}</div>
         ${tabsHtml}
-        ${tableHtml}
+        <div id="disp-tab-panel" role="tabpanel" aria-labelledby="disp-tab-${this.activeTab}">
+          ${tableHtml}
+        </div>
       </div>
-    `);
+    `, 'legacy Panel.setContent() migration'));
+  }
 
-    this.content.querySelectorAll('.disp-tab').forEach(btn => {
-      btn.addEventListener('click', () => {
-        this.activeTab = (btn as HTMLElement).dataset.tab as DisplacementTab;
-        this.renderContent();
-      });
-    });
-
-    this.content.querySelectorAll('.disp-row').forEach(el => {
-      el.addEventListener('click', () => {
-        const lat = Number((el as HTMLElement).dataset.lat);
-        const lon = Number((el as HTMLElement).dataset.lon);
-        if (Number.isFinite(lat) && Number.isFinite(lon)) this.onCountryClick?.(lat, lon);
-      });
-    });
+  public override destroy(): void {
+    if (this.followedOnlyTeardown) {
+      try {
+        this.followedOnlyTeardown();
+      } catch {
+        /* swallow */
+      }
+      this.followedOnlyTeardown = null;
+    }
+    if (this.followedUnsub) {
+      try {
+        this.followedUnsub();
+      } catch {
+        /* swallow */
+      }
+      this.followedUnsub = null;
+    }
+    if (this.followedOnlyHost && this.followedOnlyHost.parentElement) {
+      this.followedOnlyHost.parentElement.removeChild(this.followedOnlyHost);
+    }
+    this.followedOnlyHost = null;
+    this.followedOnlyChip = null;
+    super.destroy();
   }
 }

@@ -2,19 +2,11 @@
 // source: worldmonitor/conflict/v1/service.proto
 
 export interface ListAcledEventsRequest {
-  timeRange?: TimeRange;
-  pagination?: PaginationRequest;
-  country: string;
-}
-
-export interface TimeRange {
   start: number;
   end: number;
-}
-
-export interface PaginationRequest {
   pageSize: number;
   cursor: string;
+  country: string;
 }
 
 export interface ListAcledEventsResponse {
@@ -45,8 +37,10 @@ export interface PaginationResponse {
 }
 
 export interface ListUcdpEventsRequest {
-  timeRange?: TimeRange;
-  pagination?: PaginationRequest;
+  start: number;
+  end: number;
+  pageSize: number;
+  cursor: string;
   country: string;
 }
 
@@ -87,6 +81,36 @@ export interface HumanitarianCountrySummary {
   referencePeriod: string;
   conflictDemonstrations: number;
   updatedAt: number;
+}
+
+export interface ListIranEventsRequest {
+}
+
+export interface ListIranEventsResponse {
+  events: IranEvent[];
+  scrapedAt: string;
+}
+
+export interface IranEvent {
+  id: string;
+  title: string;
+  category: string;
+  sourceUrl: string;
+  latitude: number;
+  longitude: number;
+  locationName: string;
+  timestamp: string;
+  severity: string;
+}
+
+export interface GetHumanitarianSummaryBatchRequest {
+  countryCodes: string[];
+}
+
+export interface GetHumanitarianSummaryBatchResponse {
+  results: Record<string, HumanitarianCountrySummary>;
+  fetched: number;
+  requested: number;
 }
 
 export type UcdpViolenceType = "UCDP_VIOLENCE_TYPE_UNSPECIFIED" | "UCDP_VIOLENCE_TYPE_STATE_BASED" | "UCDP_VIOLENCE_TYPE_NON_STATE" | "UCDP_VIOLENCE_TYPE_ONE_SIDED";
@@ -141,7 +165,13 @@ export class ConflictServiceClient {
 
   async listAcledEvents(req: ListAcledEventsRequest, options?: ConflictServiceCallOptions): Promise<ListAcledEventsResponse> {
     let path = "/api/conflict/v1/list-acled-events";
-    const url = this.baseURL + path;
+    const params = new URLSearchParams();
+    if (req.start != null && req.start !== 0) params.set("start", String(req.start));
+    if (req.end != null && req.end !== 0) params.set("end", String(req.end));
+    if (req.pageSize != null && req.pageSize !== 0) params.set("page_size", String(req.pageSize));
+    if (req.cursor != null && req.cursor !== "") params.set("cursor", String(req.cursor));
+    if (req.country != null && req.country !== "") params.set("country", String(req.country));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -150,9 +180,8 @@ export class ConflictServiceClient {
     };
 
     const resp = await this.fetchFn(url, {
-      method: "POST",
+      method: "GET",
       headers,
-      body: JSON.stringify(req),
       signal: options?.signal,
     });
 
@@ -165,7 +194,13 @@ export class ConflictServiceClient {
 
   async listUcdpEvents(req: ListUcdpEventsRequest, options?: ConflictServiceCallOptions): Promise<ListUcdpEventsResponse> {
     let path = "/api/conflict/v1/list-ucdp-events";
-    const url = this.baseURL + path;
+    const params = new URLSearchParams();
+    if (req.start != null && req.start !== 0) params.set("start", String(req.start));
+    if (req.end != null && req.end !== 0) params.set("end", String(req.end));
+    if (req.pageSize != null && req.pageSize !== 0) params.set("page_size", String(req.pageSize));
+    if (req.cursor != null && req.cursor !== "") params.set("cursor", String(req.cursor));
+    if (req.country != null && req.country !== "") params.set("country", String(req.country));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -174,9 +209,8 @@ export class ConflictServiceClient {
     };
 
     const resp = await this.fetchFn(url, {
-      method: "POST",
+      method: "GET",
       headers,
-      body: JSON.stringify(req),
       signal: options?.signal,
     });
 
@@ -189,6 +223,54 @@ export class ConflictServiceClient {
 
   async getHumanitarianSummary(req: GetHumanitarianSummaryRequest, options?: ConflictServiceCallOptions): Promise<GetHumanitarianSummaryResponse> {
     let path = "/api/conflict/v1/get-humanitarian-summary";
+    const params = new URLSearchParams();
+    if (req.countryCode != null && req.countryCode !== "") params.set("country_code", String(req.countryCode));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as GetHumanitarianSummaryResponse;
+  }
+
+  async listIranEvents(_req: ListIranEventsRequest, options?: ConflictServiceCallOptions): Promise<ListIranEventsResponse> {
+    let path = "/api/conflict/v1/list-iran-events";
+    const url = this.baseURL + path;
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as ListIranEventsResponse;
+  }
+
+  async getHumanitarianSummaryBatch(req: GetHumanitarianSummaryBatchRequest, options?: ConflictServiceCallOptions): Promise<GetHumanitarianSummaryBatchResponse> {
+    let path = "/api/conflict/v1/get-humanitarian-summary-batch";
     const url = this.baseURL + path;
 
     const headers: Record<string, string> = {
@@ -208,7 +290,7 @@ export class ConflictServiceClient {
       return this.handleError(resp);
     }
 
-    return await resp.json() as GetHumanitarianSummaryResponse;
+    return await resp.json() as GetHumanitarianSummaryBatchResponse;
   }
 
   private async handleError(resp: Response): Promise<never> {

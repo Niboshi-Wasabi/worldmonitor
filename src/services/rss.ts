@@ -4,25 +4,21 @@ import { chunkArray, fetchWithProxy } from '@/utils';
 import { classifyByKeyword, classifyWithAI } from './threat-classifier';
 import { inferGeoHubsFromTitle } from './geo-hub-index';
 import { getPersistentCache, setPersistentCache } from './persistent-cache';
+import { dataFreshness } from './data-freshness';
 import { ingestHeadlines } from './trending-keywords';
 import { getCurrentLanguage } from './i18n';
+import { parseFeedDate, effectivePubDateMs } from './feed-date';
+import { canQueueAiClassification, AI_CLASSIFY_MAX_PER_FEED } from './ai-classify-queue';
+import { mlWorker } from './ml-worker';
+import { isHeadlineMemoryEnabled } from './ai-flow-settings';
 
-// Per-feed circuit breaker: track failures and cooldowns
-const FEED_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes after failure
-const MAX_FAILURES = 2; // failures before cooldown
-const MAX_CACHE_ENTRIES = 100; // Prevent unbounded growth
+const FEED_COOLDOWN_MS = 5 * 60 * 1000;
+const MAX_FAILURES = 2;
+const MAX_CACHE_ENTRIES = 100;
 const FEED_SCOPE_SEPARATOR = '::';
 const feedFailures = new Map<string, { count: number; cooldownUntil: number }>();
 const feedCache = new Map<string, { items: NewsItem[]; timestamp: number }>();
-const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
-const AI_CLASSIFY_DEDUP_MS = 30 * 60 * 1000;
-const AI_CLASSIFY_WINDOW_MS = 60 * 1000;
-const AI_CLASSIFY_MAX_PER_WINDOW =
-  SITE_VARIANT === 'finance' ? 40 : SITE_VARIANT === 'tech' ? 60 : 80;
-const AI_CLASSIFY_MAX_PER_FEED =
-  SITE_VARIANT === 'finance' ? 2 : SITE_VARIANT === 'tech' ? 2 : 3;
-const aiRecentlyQueued = new Map<string, number>();
-const aiDispatches: number[] = [];
+const CACHE_TTL = 30 * 60 * 1000;
 
 function toSerializable(items: NewsItem[]): Array<Omit<NewsItem, 'pubDate'> & { pubDate: string }> {
   return items.map(item => ({ ...item, pubDate: item.pubDate.toISOString() }));
@@ -31,6 +27,14 @@ function toSerializable(items: NewsItem[]): Array<Omit<NewsItem, 'pubDate'> & { 
 function fromSerializable(items: Array<Omit<NewsItem, 'pubDate'> & { pubDate: string }>): NewsItem[] {
   return items.map(item => ({ ...item, pubDate: new Date(item.pubDate) }));
 }
+
+// Cache key prefix. Bumped from `feed:` → `feed:v2:` when the item schema
+// gained `pubDateMissing` (U3 of plan 2026-05-23-001). Old `feed:`-prefix
+// entries deserialize without the flag, which would silently keep the
+// false-freshness bug alive in cached items until natural TTL. The bump
+// invalidates cleanly; old entries can be left to expire. See skill
+// `redis-cache-staleness-gotchas` for the recipe.
+const CACHE_PREFIX = 'feed:v2:';
 
 function getFeedScope(feedName: string, lang: string): string {
   return `${feedName}${FEED_SCOPE_SEPARATOR}${lang}`;
@@ -46,7 +50,7 @@ function parseFeedScope(feedScope: string): { feedName: string; lang: string } {
 }
 
 function getPersistentFeedKey(feedScope: string): string {
-  return `feed:${feedScope}`;
+  return `${CACHE_PREFIX}${feedScope}`;
 }
 
 async function readPersistentFeed(key: string): Promise<NewsItem[] | null> {
@@ -60,11 +64,16 @@ async function loadPersistentFeed(feedScope: string): Promise<NewsItem[] | null>
   const scoped = await readPersistentFeed(scopedKey);
   if (scoped) return scoped;
 
-  // Migration fallback: older builds stored feeds as `feed:<feedName>` without language scope.
-  // Only use this for English to avoid mixing cached content across locales.
+  // Language-scope migration fallback (carried forward from the pre-v2
+  // prefix era): some older v2 cache rows that predate the language-scope
+  // refactor were written without a `::<lang>` suffix. For English only,
+  // also try the unscoped key under the CURRENT v2 prefix. Pre-v2
+  // `feed:<feedScope>` and `feed:<feedName>` entries are deliberately NOT
+  // consulted — they predate the pubDateMissing schema and would
+  // re-introduce false-freshness for cached items.
   const { feedName, lang } = parseFeedScope(feedScope);
   if (lang !== 'en') return null;
-  return readPersistentFeed(`feed:${feedName}`);
+  return readPersistentFeed(`${CACHE_PREFIX}${feedName}`);
 }
 
 // Clean up stale entries to prevent unbounded growth
@@ -130,33 +139,75 @@ export function getFeedFailures(): Map<string, { count: number; cooldownUntil: n
   return currentLangFailures;
 }
 
-function toAiKey(title: string): string {
-  return title.trim().toLowerCase().replace(/\s+/g, ' ');
-}
 
-function canQueueAiClassification(title: string): boolean {
-  const now = Date.now();
-  while (aiDispatches.length > 0 && now - aiDispatches[0]! > AI_CLASSIFY_WINDOW_MS) {
-    aiDispatches.shift();
-  }
-  for (const [key, queuedAt] of aiRecentlyQueued) {
-    if (now - queuedAt > AI_CLASSIFY_DEDUP_MS) {
-      aiRecentlyQueued.delete(key);
+/**
+ * Extract the best image URL from an RSS item element.
+ * Tries multiple RSS image sources in priority order:
+ * 1. media:content (Yahoo MRSS namespace)
+ * 2. media:thumbnail (Yahoo MRSS namespace)
+ * 3. <enclosure> with image type
+ * 4. First <img> in description/content:encoded
+ * Returns undefined if no image found. Never throws.
+ */
+function extractImageUrl(item: Element): string | undefined {
+  const MRSS_NS = 'http://search.yahoo.com/mrss/';
+  const IMG_EXTENSIONS = /\.(jpg|jpeg|png|gif|webp|avif|svg)(\?|$)/i;
+
+  try {
+    // 1. media:content with MRSS namespace
+    const mediaContents = item.getElementsByTagNameNS(MRSS_NS, 'content');
+    for (let i = 0; i < mediaContents.length; i++) {
+      const el = mediaContents[i]!;
+      const url = el.getAttribute('url');
+      if (!url) continue;
+      const medium = el.getAttribute('medium');
+      const type = el.getAttribute('type');
+      // Accept if medium is image, type contains image, URL looks like image, or no type specified
+      if (medium === 'image' || type?.startsWith('image/') || IMG_EXTENSIONS.test(url) || (!type && !medium)) {
+        return url;
+      }
     }
-  }
-  if (aiDispatches.length >= AI_CLASSIFY_MAX_PER_WINDOW) {
-    return false;
-  }
-
-  const key = toAiKey(title);
-  const lastQueued = aiRecentlyQueued.get(key);
-  if (lastQueued && now - lastQueued < AI_CLASSIFY_DEDUP_MS) {
-    return false;
+  } catch {
+    // Namespace not supported or other XML issue, fall through
   }
 
-  aiDispatches.push(now);
-  aiRecentlyQueued.set(key, now);
-  return true;
+  try {
+    // 2. media:thumbnail with MRSS namespace
+    const thumbnails = item.getElementsByTagNameNS(MRSS_NS, 'thumbnail');
+    for (let i = 0; i < thumbnails.length; i++) {
+      const url = thumbnails[i]!.getAttribute('url');
+      if (url) return url;
+    }
+  } catch {
+    // Fall through
+  }
+
+  try {
+    // 3. <enclosure> with image type
+    const enclosures = item.getElementsByTagName('enclosure');
+    for (let i = 0; i < enclosures.length; i++) {
+      const el = enclosures[i]!;
+      const type = el.getAttribute('type');
+      const url = el.getAttribute('url');
+      if (url && type?.startsWith('image/')) return url;
+    }
+  } catch {
+    // Fall through
+  }
+
+  try {
+    // 4. Fallback: parse first <img src="..."> from description or content:encoded
+    const description = item.querySelector('description')?.textContent || '';
+    const contentEncoded = item.getElementsByTagNameNS('http://purl.org/rss/1.0/modules/content/', 'encoded');
+    const contentText = contentEncoded.length > 0 ? (contentEncoded[0]!.textContent || '') : '';
+    const htmlContent = contentText || description;
+    const imgMatch = htmlContent.match(/<img[^>]+src=["']([^"']+)["']/);
+    if (imgMatch?.[1]) return imgMatch[1];
+  } catch {
+    // Fall through
+  }
+
+  return undefined;
 }
 
 export async function fetchFeed(feed: Feed): Promise<NewsItem[]> {
@@ -176,9 +227,9 @@ export async function fetchFeed(feed: Feed): Promise<NewsItem[]> {
   }
 
   try {
-    let url = typeof feed.url === 'string' ? feed.url : feed.url['en'];
+    let url = typeof feed.url === 'string' ? feed.url : feed.url.en;
     if (typeof feed.url !== 'string') {
-      url = feed.url[currentLang] || feed.url['en'] || Object.values(feed.url)[0] || '';
+      url = feed.url[currentLang] || feed.url.en || Object.values(feed.url)[0] || '';
     }
 
     if (!url) throw new Error(`No URL found for feed ${feed.name}`);
@@ -213,11 +264,22 @@ export async function fetchFeed(feed: Feed): Promise<NewsItem[]> {
           link = item.querySelector('link')?.textContent || '';
         }
 
+        // Dublin Core (<dc:date>) fallback for RSS feeds. ArXiv RSS (already
+        // in the feed registry as "ArXiv AI", "ArXiv ML") ships dc:date with
+        // no <pubDate>; without this fallback every ArXiv item would land
+        // with pubDateMissing=true and get demoted in every freshness ranking.
+        // Prior precedent: PR #3417. querySelector('dc\\:date') escapes the
+        // CSS-selector colon so the XML qname matches; getElementsByTagName
+        // is an alternative that also works under browser DOMParser in XML
+        // mode. textContent reads the element's inner text without namespace
+        // gymnastics.
         const pubDateStr = isAtom
           ? (item.querySelector('published')?.textContent || item.querySelector('updated')?.textContent || '')
-          : (item.querySelector('pubDate')?.textContent || '');
-        const parsedDate = pubDateStr ? new Date(pubDateStr) : new Date();
-        const pubDate = Number.isNaN(parsedDate.getTime()) ? new Date() : parsedDate;
+          : (item.querySelector('pubDate')?.textContent
+            || item.querySelector('dc\\:date')?.textContent
+            || item.getElementsByTagName('dc:date')[0]?.textContent
+            || '');
+        const { date: pubDate, missing: pubDateMissing } = parseFeedDate(pubDateStr);
         const threat = classifyByKeyword(title, SITE_VARIANT);
         const isAlert = threat.level === 'critical' || threat.level === 'high';
         const geoMatches = inferGeoHubsFromTitle(title);
@@ -228,10 +290,12 @@ export async function fetchFeed(feed: Feed): Promise<NewsItem[]> {
           title,
           link,
           pubDate,
+          pubDateMissing,
           isAlert,
           threat,
           ...(topGeo && { lat: topGeo.hub.lat, lon: topGeo.hub.lon, locationName: topGeo.hub.name }),
           lang: feed.lang,
+          ...(SITE_VARIANT === 'happy' && { imageUrl: extractImageUrl(item) }),
         };
       });
 
@@ -245,13 +309,23 @@ export async function fetchFeed(feed: Feed): Promise<NewsItem[]> {
       link: item.link,
     })));
 
+    if (isHeadlineMemoryEnabled() && mlWorker.isAvailable && mlWorker.isModelLoaded('embeddings') && parsed.length > 0) {
+      mlWorker.vectorStoreIngest(parsed.map(item => ({
+        text: item.title,
+        pubDate: item.pubDate.getTime(),
+        source: item.source,
+        url: item.link,
+        tags: item.locationName ? [item.locationName] : undefined,
+      }))).catch(() => {});
+    }
+
     const aiCandidates = parsed
       .filter(item => item.threat.source === 'keyword')
-      .sort((a, b) => b.pubDate.getTime() - a.pubDate.getTime())
+      .sort((a, b) => effectivePubDateMs(b) - effectivePubDateMs(a))
       .slice(0, AI_CLASSIFY_MAX_PER_FEED);
 
     for (const item of aiCandidates) {
-      if (!canQueueAiClassification(item.title)) continue;
+      if (!canQueueAiClassification({ link: item.link, title: item.title })) continue;
       classifyWithAI(item.title, SITE_VARIANT).then((aiResult) => {
         if (aiResult && aiResult.confidence > item.threat.confidence) {
           item.threat = aiResult;
@@ -289,22 +363,22 @@ export async function fetchCategoryFeeds(
   const topItems: NewsItem[] = [];
   let totalItems = 0;
 
-  const ensureSortedDescending = () => [...topItems].sort((a, b) => b.pubDate.getTime() - a.pubDate.getTime());
+  const ensureSortedDescending = () => [...topItems].sort((a, b) => effectivePubDateMs(b) - effectivePubDateMs(a));
 
   const insertTopItem = (item: NewsItem) => {
     totalItems += 1;
     if (topItems.length < topLimit) {
       topItems.push(item);
-      if (topItems.length === topLimit) topItems.sort((a, b) => a.pubDate.getTime() - b.pubDate.getTime());
+      if (topItems.length === topLimit) topItems.sort((a, b) => effectivePubDateMs(a) - effectivePubDateMs(b));
       return;
     }
 
-    const itemTime = item.pubDate.getTime();
-    if (itemTime <= topItems[0]!.pubDate.getTime()) return;
+    const itemTime = effectivePubDateMs(item);
+    if (itemTime <= effectivePubDateMs(topItems[0]!)) return;
 
     topItems[0] = item;
     for (let i = 0; i < topItems.length - 1; i += 1) {
-      if (topItems[i]!.pubDate.getTime() <= topItems[i + 1]!.pubDate.getTime()) break;
+      if (effectivePubDateMs(topItems[i]!) <= effectivePubDateMs(topItems[i + 1]!)) break;
       [topItems[i], topItems[i + 1]] = [topItems[i + 1]!, topItems[i]!];
     }
   };
@@ -316,9 +390,7 @@ export async function fetchCategoryFeeds(
   }
 
   if (totalItems > 0) {
-    import('./data-freshness').then(({ dataFreshness }) => {
-      dataFreshness.recordUpdate('rss', totalItems);
-    });
+    dataFreshness.recordUpdate('rss', totalItems);
   }
 
   return ensureSortedDescending();

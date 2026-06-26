@@ -6,13 +6,17 @@
  * instead of the legacy /api/wingbits proxy.
  */
 
-import { createCircuitBreaker } from '@/utils';
+import { createCircuitBreaker, toUniqueSortedLowercase } from '@/utils';
+import { getRpcBaseUrl } from '@/services/rpc-client';
 import { dataFreshness } from './data-freshness';
 import { isFeatureAvailable } from './runtime-config';
 import {
   MilitaryServiceClient,
   type AircraftDetails,
+  type WingbitsLiveFlight,
 } from '@/generated/client/worldmonitor/military/v1/service_client';
+
+export type { WingbitsLiveFlight };
 
 export interface WingbitsAircraftDetails {
   icao24: string;
@@ -48,7 +52,7 @@ export interface EnrichedAircraftInfo {
 
 // ---- Sebuf client ----
 
-const client = new MilitaryServiceClient('', { fetch: (...args) => globalThis.fetch(...args) });
+const client = new MilitaryServiceClient(getRpcBaseUrl(), { fetch: (...args) => globalThis.fetch(...args) });
 
 // Client-side cache for aircraft details
 const localCache = new Map<string, { data: WingbitsAircraftDetails; timestamp: number }>();
@@ -162,6 +166,26 @@ function toWingbitsDetails(d: AircraftDetails): WingbitsAircraftDetails {
   };
 }
 
+function createNegativeDetailsEntry(icao24: string): WingbitsAircraftDetails {
+  return {
+    icao24,
+    registration: null,
+    manufacturerIcao: null,
+    manufacturerName: null,
+    model: null,
+    typecode: null,
+    serialNumber: null,
+    icaoAircraftType: null,
+    operator: null,
+    operatorCallsign: null,
+    operatorIcao: null,
+    owner: null,
+    built: null,
+    engines: null,
+    categoryDescription: null,
+  };
+}
+
 /**
  * Check if Wingbits API is configured
  */
@@ -173,7 +197,6 @@ export async function checkWingbitsStatus(): Promise<boolean> {
     const resp = await client.getWingbitsStatus({});
     wingbitsConfigured = resp.configured;
     dataFreshness.setEnabled('wingbits', wingbitsConfigured);
-    console.log(`[Wingbits] Status: ${wingbitsConfigured ? 'configured' : 'not configured'}`);
     return wingbitsConfigured;
   } catch {
     wingbitsConfigured = false;
@@ -206,7 +229,7 @@ export async function getAircraftDetails(icao24: string): Promise<WingbitsAircra
 
     if (!resp.details) {
       // Cache negative result
-      setLocalCache(key, { icao24: key } as WingbitsAircraftDetails);
+      setLocalCache(key, createNegativeDetailsEntry(key));
       return null;
     }
 
@@ -223,10 +246,10 @@ export async function getAircraftDetailsBatch(icao24List: string[]): Promise<Map
   if (!isFeatureAvailable('wingbitsEnrichment')) return new Map();
   const results = new Map<string, WingbitsAircraftDetails>();
   const toFetch: string[] = [];
+  const requestedKeys = toUniqueSortedLowercase(icao24List);
 
   // Check local cache first
-  for (const icao24 of icao24List) {
-    const key = icao24.toLowerCase();
+  for (const key of requestedKeys) {
     const cached = getFromLocalCache(key);
     if (cached) {
       if (cached.registration) { // Only include valid results
@@ -250,15 +273,27 @@ export async function getAircraftDetailsBatch(icao24List: string[]): Promise<Map
     }
 
     // Process results
+    const returnedKeys = new Set<string>();
     for (const [icao24, protoDetails] of Object.entries(resp.results)) {
+      const key = icao24.toLowerCase();
+      returnedKeys.add(key);
       const details = toWingbitsDetails(protoDetails);
-      setLocalCache(icao24, details);
+      setLocalCache(key, details);
       if (details.registration) {
-        results.set(icao24, details);
+        results.set(key, details);
       }
     }
 
-    console.log(`[Wingbits] Batch: ${results.size} enriched, ${resp.fetched || 0} fetched`);
+    // Cache missing lookups as negative entries to avoid repeated retries.
+    const requestedCount = Number.isFinite(resp.requested)
+      ? Math.max(0, Math.min(toFetch.length, resp.requested))
+      : toFetch.length;
+    for (const key of toFetch.slice(0, requestedCount)) {
+      if (!returnedKeys.has(key)) {
+        setLocalCache(key, createNegativeDetailsEntry(key));
+      }
+    }
+
     if (results.size > 0) {
       dataFreshness.recordUpdate('wingbits', results.size);
     }
@@ -379,4 +414,18 @@ export function getWingbitsStatus(): { configured: boolean | null; cacheSize: nu
 export function clearWingbitsCache(): void {
   localCache.clear();
   lastCacheSweep = 0;
+}
+
+/**
+ * Fetch live position data from the Wingbits ECS network for a single aircraft.
+ * Returns null if the aircraft is not currently tracked by any Wingbits receiver.
+ */
+export async function getWingbitsLiveFlight(icao24: string): Promise<WingbitsLiveFlight | null> {
+  if (!isFeatureAvailable('wingbitsEnrichment')) return null;
+  try {
+    const resp = await client.getWingbitsLiveFlight({ icao24: icao24.toLowerCase() });
+    return resp.flight ?? null;
+  } catch {
+    return null;
+  }
 }

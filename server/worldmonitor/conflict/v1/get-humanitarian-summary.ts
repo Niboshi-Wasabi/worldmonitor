@@ -14,20 +14,11 @@ import type {
 } from '../../../../src/generated/server/worldmonitor/conflict/v1/service_server';
 
 import { CHROME_UA } from '../../../_shared/constants';
-import { getCachedJson, setCachedJson } from '../../../_shared/redis';
+import { cachedFetchJson } from '../../../_shared/redis';
+import { ISO2_TO_ISO3 } from './_shared';
 
 const REDIS_CACHE_KEY = 'conflict:humanitarian:v1';
 const REDIS_CACHE_TTL = 21600; // 6 hr — monthly humanitarian data
-
-const ISO2_TO_ISO3: Record<string, string> = {
-  US: 'USA', RU: 'RUS', CN: 'CHN', UA: 'UKR', IR: 'IRN',
-  IL: 'ISR', TW: 'TWN', KP: 'PRK', SA: 'SAU', TR: 'TUR',
-  PL: 'POL', DE: 'DEU', FR: 'FRA', GB: 'GBR', IN: 'IND',
-  PK: 'PAK', SY: 'SYR', YE: 'YEM', MM: 'MMR', VE: 'VEN',
-  AF: 'AFG', SD: 'SDN', SS: 'SSD', SO: 'SOM', CD: 'COD',
-  ET: 'ETH', IQ: 'IRQ', CO: 'COL', NG: 'NGA', PS: 'PSE',
-  BR: 'BRA', AE: 'ARE',
-};
 
 interface HapiCountryAgg {
   iso3: string;
@@ -148,17 +139,16 @@ export async function getHumanitarianSummary(
   _ctx: ServerContext,
   req: GetHumanitarianSummaryRequest,
 ): Promise<GetHumanitarianSummaryResponse> {
+  if (!req.countryCode) return { summary: undefined };
   try {
     const cacheKey = `${REDIS_CACHE_KEY}:${req.countryCode || 'all'}`;
-    const cached = (await getCachedJson(cacheKey)) as GetHumanitarianSummaryResponse | null;
-    if (cached?.summary) return cached;
 
-    const summary = await fetchHapiSummary(req.countryCode);
-    const result: GetHumanitarianSummaryResponse = { summary };
-    if (summary) {
-      setCachedJson(cacheKey, result, REDIS_CACHE_TTL).catch(() => {});
-    }
-    return result;
+    const result = await cachedFetchJson<GetHumanitarianSummaryResponse>(cacheKey, REDIS_CACHE_TTL, async () => {
+      const summary = await fetchHapiSummary(req.countryCode);
+      return summary ? { summary } : null;
+    });
+
+    return result || { summary: undefined };
   } catch {
     return { summary: undefined };
   }

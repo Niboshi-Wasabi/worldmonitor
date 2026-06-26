@@ -1,382 +1,563 @@
 /**
- * PostHog Analytics Service
+ * Analytics facade — wired to Umami.
  *
- * Always active when VITE_POSTHOG_KEY is set. No consent gate.
- * All exports are no-ops when the key is absent (dev/local).
- *
- * Data safety:
- * - Typed allowlists per event — unlisted properties silently dropped
- * - sanitize_properties callback strips strings matching API key prefixes
- * - No session recordings, no autocapture
- * - distinct_id is a random UUID — pseudonymous, not identifiable
+ * Dashboard analytics load after first paint; calls made before the script
+ * arrives are kept in a small bounded queue and replayed on script load.
  */
 
-import { isDesktopRuntime } from './runtime';
-import { getRuntimeConfigSnapshot, type RuntimeSecretKey } from './runtime-config';
-import { SITE_VARIANT } from '@/config';
-import { isMobileDevice } from '@/utils';
-import { invokeTauri } from './tauri-bridge';
+import { scheduleAfterFirstPaint } from '@/utils/after-paint';
+import { subscribeAuthState, type AuthSession } from './auth-state';
+import { onSubscriptionChange, type SubscriptionInfo } from './billing';
+import { getClerkUserCreatedAt } from './clerk';
 
-// ── Installation identity ──
+const UMAMI_SCRIPT_SRC = 'https://abacus.worldmonitor.app/script.js';
+const UMAMI_WEBSITE_ID = 'e8800335-c853-46a8-8497-c993ed2f58bc';
+// data-domains is temporarily reduced to worldmonitor.app + happy.worldmonitor.app
+// while upstream Umami issue #4183 (https://github.com/umami-software/umami/issues/4183)
+// is open — v3.1.0 has a race in prisma.sessionData.updateMany() that returns HTTP 500
+// from /api/send for 4-8% of requests across all listed hosts. Self-hosted Umami has no
+// fix tag yet (master since 2026-04-17 has 22 commits but none touch sessionData). The
+// tracker self-disables when the current hostname isn't in data-domains — the same
+// mechanism that keeps energy.worldmonitor.app silent. Restore tech, finance, and
+// commodity once #4183 ships in a tagged release.
+const UMAMI_DOMAINS = 'worldmonitor.app,happy.worldmonitor.app';
+const UMAMI_QUEUE_LIMIT = 50;
+const UMAMI_LOAD_ATTEMPT_LIMIT = 2;
+const UMAMI_LOAD_RETRY_DELAY_MS = 5_000;
 
-function getOrCreateInstallationId(): string {
-  const STORAGE_KEY = 'wm-installation-id';
-  let id = localStorage.getItem(STORAGE_KEY);
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem(STORAGE_KEY, id);
+type QueuedUmamiCall =
+  | { kind: 'track'; event: UmamiEvent; data?: Record<string, unknown> }
+  | { kind: 'identify'; data: Record<string, unknown> };
+
+const pendingUmamiCalls: QueuedUmamiCall[] = [];
+let umamiLoadScheduled = false;
+let umamiLoadStarted = false;
+let umamiLoadAttempts = 0;
+
+// ---------------------------------------------------------------------------
+// Type-safe event catalog — every event name lives here.
+// Typo in an event string = compile error.
+// ---------------------------------------------------------------------------
+
+const EVENTS = {
+  // Search
+  'search-open': true,
+  'search-used': true,
+  'search-result-selected': true,
+  // Country / map
+  'country-selected': true,
+  'country-brief-opened': true,
+  'map-layer-toggle': true,
+  // Panels
+  'panel-toggle': true,
+  // Settings
+  'settings-open': true,
+  'variant-switch': true,
+  'theme-changed': true,
+  'language-change': true,
+  'feature-toggle': true,
+  // News
+  'news-sort-toggle': true,
+  'news-summarize': true,
+  'live-news-fullscreen': true,
+  // Webcams
+  'webcam-selected': true,
+  'webcam-region-filter': true,
+  'webcam-fullscreen': true,
+  // Downloads / banners
+  'download-clicked': true,
+  'critical-banner': true,
+  // AI widget
+  'widget-ai-open': true,
+  'widget-ai-generate': true,
+  'widget-ai-success': true,
+  // WM Analyst dashboard control
+  'analyst-control-action': true,
+  // MCP
+  'mcp-connect-attempt': true,
+  'mcp-connect-success': true,
+  'mcp-panel-add': true,
+  // WebMCP (in-page agent tool surface)
+  'webmcp-registered': true,
+  'webmcp-tool-invoked': true,
+  // Route Explorer
+  'route-explorer:opened': true,
+  'route-explorer:query': true,
+  'route-explorer:tab-switch': true,
+  'route-explorer:alternative-selected': true,
+  'route-explorer:impact-viewed': true,
+  'route-explorer:share-copied': true,
+  'route-explorer:free-cta-click': true,
+  'route-explorer:closed': true,
+  // Auth (wired in PR #1812 — do not remove)
+  'sign-in': true,
+  'sign-up': true,
+  'sign-out': true,
+  'gate-hit': true,
+  // Brief — open-rate lift measurement for U10's followed-country bias
+  // (followed-countries plan U11). Fired from the dashboard cover card
+  // and from the hosted magazine source-link clicks. `followed` flags
+  // whether the click target maps to a country the user follows;
+  // correlate with non-followed threads to size the bias's effect.
+  'brief-thread-open': true,
+} as const;
+
+export type UmamiEvent = keyof typeof EVENTS;
+
+function queueUmamiCall(call: QueuedUmamiCall): void {
+  if (pendingUmamiCalls.length >= UMAMI_QUEUE_LIMIT) {
+    pendingUmamiCalls.shift();
   }
-  return id;
+  pendingUmamiCalls.push(call);
 }
 
-// ── Stable property name map for secret keys ──
-
-const SECRET_ANALYTICS_NAMES: Record<RuntimeSecretKey, string> = {
-  GROQ_API_KEY: 'groq',
-  OPENROUTER_API_KEY: 'openrouter',
-  FRED_API_KEY: 'fred',
-  EIA_API_KEY: 'eia',
-  CLOUDFLARE_API_TOKEN: 'cloudflare',
-  ACLED_ACCESS_TOKEN: 'acled',
-  URLHAUS_AUTH_KEY: 'urlhaus',
-  OTX_API_KEY: 'otx',
-  ABUSEIPDB_API_KEY: 'abuseipdb',
-  WINGBITS_API_KEY: 'wingbits',
-  WS_RELAY_URL: 'ws_relay',
-  VITE_OPENSKY_RELAY_URL: 'opensky_relay',
-  OPENSKY_CLIENT_ID: 'opensky',
-  OPENSKY_CLIENT_SECRET: 'opensky_secret',
-  AISSTREAM_API_KEY: 'aisstream',
-  FINNHUB_API_KEY: 'finnhub',
-  NASA_FIRMS_API_KEY: 'nasa_firms',
-  UC_DP_KEY: 'uc_dp',
-  OLLAMA_API_URL: 'ollama_url',
-  OLLAMA_MODEL: 'ollama_model',
-  WORLDMONITOR_API_KEY: 'worldmonitor',
-};
-
-// ── Typed event schemas (allowlisted properties per event) ──
-
-const HAS_KEYS = Object.values(SECRET_ANALYTICS_NAMES).map(n => `has_${n}`);
-
-const EVENT_SCHEMAS: Record<string, Set<string>> = {
-  // Phase 1 — core events
-  wm_app_loaded: new Set(['load_time_ms', 'panel_count']),
-  wm_panel_viewed: new Set(['panel_id']),
-  wm_summary_generated: new Set(['provider', 'model', 'cached']),
-  wm_summary_failed: new Set(['last_provider']),
-  wm_api_keys_configured: new Set([
-    'total_keys_configured', 'total_features_enabled', 'enabled_features',
-    'ollama_model', 'platform',
-    ...HAS_KEYS,
-  ]),
-  // Phase 2 — plan-specified events
-  wm_panel_resized: new Set(['panel_id', 'new_span']),
-  wm_variant_switched: new Set(['from', 'to']),
-  wm_map_layer_toggled: new Set(['layer_id', 'enabled', 'source']),
-  wm_country_brief_opened: new Set(['country_code']),
-  wm_theme_changed: new Set(['theme']),
-  wm_language_changed: new Set(['language']),
-  wm_feature_toggled: new Set(['feature_id', 'enabled']),
-  wm_search_used: new Set(['query_length', 'result_count']),
-  // Phase 2 — additional interaction events
-  wm_map_view_changed: new Set(['view']),
-  wm_country_selected: new Set(['country_code', 'country_name', 'source']),
-  wm_search_result_selected: new Set(['result_type']),
-  wm_panel_toggled: new Set(['panel_id', 'enabled']),
-  wm_finding_clicked: new Set(['finding_id', 'finding_source', 'finding_type', 'priority']),
-  wm_update_shown: new Set(['current_version', 'remote_version']),
-  wm_update_clicked: new Set(['target_version']),
-  wm_update_dismissed: new Set(['target_version']),
-  wm_critical_banner_action: new Set(['action', 'theater_id']),
-  wm_download_clicked: new Set(['platform']),
-  wm_download_banner_dismissed: new Set([]),
-  wm_webcam_selected: new Set(['webcam_id', 'city', 'view_mode']),
-  wm_webcam_region_filtered: new Set(['region']),
-  wm_deeplink_opened: new Set(['deeplink_type', 'target']),
-};
-
-function sanitizeProps(event: string, raw: Record<string, unknown>): Record<string, unknown> {
-  const allowed = EVENT_SCHEMAS[event];
-  if (!allowed) return {};
-  const safe: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(raw)) {
-    if (allowed.has(k)) safe[k] = v;
-  }
-  return safe;
-}
-
-// ── Defense-in-depth: strip values that look like API keys ──
-
-const API_KEY_PREFIXES = /^(sk-|gsk_|or-|Bearer )/;
-
-function deepStripSecrets(props: Record<string, unknown>): Record<string, unknown> {
-  const cleaned: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(props)) {
-    if (typeof v === 'string' && API_KEY_PREFIXES.test(v)) {
-      cleaned[k] = '[REDACTED]';
+function sendUmamiCall(call: QueuedUmamiCall): boolean {
+  if (typeof window === 'undefined') return false;
+  const umami = window.umami;
+  if (!umami) return false;
+  try {
+    if (call.kind === 'track') {
+      umami.track(call.event, call.data);
     } else {
-      cleaned[k] = v;
+      umami.identify(call.data);
     }
+    return true;
+  } catch {
+    return false;
   }
-  return cleaned;
 }
 
-// ── PostHog instance management ──
+function flushPendingUmamiCalls(): void {
+  if (pendingUmamiCalls.length === 0) return;
+  if (typeof window === 'undefined' || !window.umami) return;
+  const calls = pendingUmamiCalls.splice(0, pendingUmamiCalls.length);
+  for (const call of calls) sendUmamiCall(call);
+}
 
-type PostHogInstance = {
-  init: (key: string, config: Record<string, unknown>) => void;
-  register: (props: Record<string, unknown>) => void;
-  capture: (event: string, props?: Record<string, unknown>, options?: { transport?: 'XHR' | 'sendBeacon' }) => void;
-};
-
-let posthogInstance: PostHogInstance | null = null;
-let initPromise: Promise<void> | null = null;
-
-const POSTHOG_KEY = import.meta.env.VITE_POSTHOG_KEY as string | undefined;
-const POSTHOG_HOST = isDesktopRuntime()
-  ? ((import.meta.env.VITE_POSTHOG_HOST as string | undefined) || 'https://us.i.posthog.com')
-  : '/ingest'; // Reverse proxy through own domain to bypass ad blockers
-
-// ── Public API ──
-
-export async function initAnalytics(): Promise<void> {
-  if (!POSTHOG_KEY) return;
-  if (initPromise) return initPromise;
-
-  initPromise = (async () => {
-    try {
-      const mod = await import('posthog-js');
-      const posthog = mod.default;
-
-      posthog.init(POSTHOG_KEY, {
-        api_host: POSTHOG_HOST,
-        persistence: 'localStorage',
-        autocapture: false,
-        capture_pageview: false, // Manual capture below — auto-capture silently fails with bootstrap + SPA
-        capture_pageleave: true,
-        disable_session_recording: true,
-        bootstrap: { distinctID: getOrCreateInstallationId() },
-        sanitize_properties: (props: Record<string, unknown>) => deepStripSecrets(props),
-      });
-
-      // Register super properties (attached to every event)
-      const superProps: Record<string, unknown> = {
-        platform: isDesktopRuntime() ? 'desktop' : 'web',
-        variant: SITE_VARIANT,
-        app_version: __APP_VERSION__,
-        is_mobile: isMobileDevice(),
-        screen_width: screen.width,
-        screen_height: screen.height,
-        viewport_width: innerWidth,
-        viewport_height: innerHeight,
-        is_big_screen: screen.width >= 2560 || screen.height >= 1440,
-        is_tv_mode: screen.width >= 3840,
-        device_pixel_ratio: devicePixelRatio,
-        browser_language: navigator.language,
-        local_hour: new Date().getHours(),
-        local_day: new Date().getDay(),
-      };
-
-      // Desktop additionally registers OS and arch
-      if (isDesktopRuntime()) {
-        try {
-          const info = await invokeTauri<{ os: string; arch: string }>('get_desktop_runtime_info');
-          superProps.desktop_os = info.os;
-          superProps.desktop_arch = info.arch;
-        } catch {
-          // Tauri bridge may not be available yet
-        }
-      }
-
-      posthog.register(superProps);
-      posthogInstance = posthog as unknown as PostHogInstance;
-
-      // Fire $pageview manually after full init — auto capture_pageview: true
-      // fires during init() before super props are registered, and silently
-      // fails with bootstrap + SPA setups (posthog-js #386).
-      posthog.capture('$pageview');
-
-      // Flush any events queued while offline (desktop)
-      flushOfflineQueue();
-
-      // Re-flush when coming back online
-      if (isDesktopRuntime()) {
-        window.addEventListener('online', () => flushOfflineQueue());
-      }
-    } catch (error) {
-      console.warn('[Analytics] Failed to initialize PostHog:', error);
+function loadUmamiScript(): void {
+  if (umamiLoadStarted || typeof document === 'undefined') return;
+  const existing = document.querySelector<HTMLScriptElement>(`script[src="${UMAMI_SCRIPT_SRC}"]`);
+  if (existing) {
+    // A script tag already exists (e.g. re-entry after a soft navigation).
+    // Mark load as started so the guard above short-circuits future calls.
+    // If Umami already initialised, flush now; otherwise wait for its load
+    // event. Flushing unconditionally before window.umami is set is a no-op
+    // and a dead {once:true} listener if load already fired.
+    umamiLoadStarted = true;
+    if (typeof window !== 'undefined' && window.umami) {
+      flushPendingUmamiCalls();
+    } else {
+      existing.addEventListener('load', flushPendingUmamiCalls, { once: true });
     }
-  })();
-
-  return initPromise;
-}
-
-// ── Offline event queue (desktop) ──
-
-const OFFLINE_QUEUE_KEY = 'wm-analytics-offline-queue';
-const OFFLINE_QUEUE_CAP = 200;
-
-function enqueueOffline(name: string, props: Record<string, unknown>): void {
-  try {
-    const raw = localStorage.getItem(OFFLINE_QUEUE_KEY);
-    const queue: Array<{ name: string; props: Record<string, unknown>; ts: number }> = raw ? JSON.parse(raw) : [];
-    queue.push({ name, props, ts: Date.now() });
-    if (queue.length > OFFLINE_QUEUE_CAP) queue.splice(0, queue.length - OFFLINE_QUEUE_CAP);
-    localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(queue));
-  } catch { /* localStorage full or unavailable */ }
-}
-
-function flushOfflineQueue(): void {
-  if (!posthogInstance) return;
-  try {
-    const raw = localStorage.getItem(OFFLINE_QUEUE_KEY);
-    if (!raw) return;
-    const queue: Array<{ name: string; props: Record<string, unknown> }> = JSON.parse(raw);
-    localStorage.removeItem(OFFLINE_QUEUE_KEY);
-    for (const { name, props } of queue) {
-      posthogInstance.capture(name, props);
-    }
-  } catch { /* corrupt queue, discard */ }
-}
-
-export function trackEvent(name: string, props?: Record<string, unknown>): void {
-  const safeProps = props ? sanitizeProps(name, props) : {};
-  if (!posthogInstance) {
-    if (isDesktopRuntime() && POSTHOG_KEY) enqueueOffline(name, safeProps);
     return;
   }
-  posthogInstance.capture(name, safeProps);
+
+  umamiLoadStarted = true;
+  umamiLoadAttempts += 1;
+  const script = document.createElement('script');
+  script.async = true;
+  script.src = UMAMI_SCRIPT_SRC;
+  script.dataset.websiteId = UMAMI_WEBSITE_ID;
+  script.dataset.domains = UMAMI_DOMAINS;
+  script.addEventListener('load', flushPendingUmamiCalls, { once: true });
+  script.addEventListener('error', () => {
+    umamiLoadStarted = false;
+    script.remove();
+    if (umamiLoadAttempts < UMAMI_LOAD_ATTEMPT_LIMIT) {
+      setTimeout(loadUmamiScript, UMAMI_LOAD_RETRY_DELAY_MS);
+    }
+  }, { once: true });
+  document.head.appendChild(script);
 }
 
-/** Use sendBeacon transport for events fired just before page reload. */
-export function trackEventBeforeUnload(name: string, props?: Record<string, unknown>): void {
-  if (!posthogInstance) return;
-  const safeProps = props ? sanitizeProps(name, props) : {};
-  posthogInstance.capture(name, safeProps, { transport: 'sendBeacon' });
-}
-
-export function trackPanelView(panelId: string): void {
-  trackEvent('wm_panel_viewed', { panel_id: panelId });
-}
-
-export function trackApiKeysSnapshot(): void {
-  const config = getRuntimeConfigSnapshot();
-  const presence: Record<string, boolean> = {};
-  for (const [internalKey, analyticsName] of Object.entries(SECRET_ANALYTICS_NAMES)) {
-    const state = config.secrets[internalKey as RuntimeSecretKey];
-    presence[`has_${analyticsName}`] = Boolean(state?.value);
+/** Type-safe Umami wrapper. Safe to call even if the script hasn't loaded. */
+export function track(event: UmamiEvent, data?: Record<string, unknown>): void {
+  if (!sendUmamiCall({ kind: 'track', event, data })) {
+    queueUmamiCall({ kind: 'track', event, data });
   }
+}
 
-  const enabledFeatures = Object.entries(config.featureToggles)
-    .filter(([, v]) => v).map(([k]) => k);
+export function initAnalytics(): void {
+  if (umamiLoadScheduled || typeof window === 'undefined' || typeof document === 'undefined') return;
+  umamiLoadScheduled = true;
+  scheduleAfterFirstPaint(loadUmamiScript, 3000);
+}
 
-  trackEvent('wm_api_keys_configured', {
-    platform: isDesktopRuntime() ? 'desktop' : 'web',
-    total_keys_configured: Object.values(presence).filter(Boolean).length,
-    ...presence,
-    enabled_features: enabledFeatures,
-    total_features_enabled: enabledFeatures.length,
-    ollama_model: config.secrets.OLLAMA_MODEL?.value || 'none',
+// ---------------------------------------------------------------------------
+// User identity — call after auth state resolves so Umami can segment events
+// by user/plan. Safe to call before Umami script loads.
+// ---------------------------------------------------------------------------
+
+export function identifyUser(
+  userId: string,
+  plan: string,
+  subStatus?: SubscriptionInfo['status'] | null,
+  planKey?: string | null,
+): void {
+  const data = {
+    userId,
+    plan,
+    ...(subStatus != null && { subStatus }),
+    ...(planKey != null && { planKey }),
+  };
+  if (!sendUmamiCall({ kind: 'identify', data })) {
+    queueUmamiCall({ kind: 'identify', data });
+  }
+}
+
+export function clearIdentity(): void {
+  if (!sendUmamiCall({ kind: 'identify', data: {} })) {
+    queueUmamiCall({ kind: 'identify', data: {} });
+  }
+}
+
+let _unsubAuth: (() => void) | null = null;
+let _unsubBilling: (() => void) | null = null;
+
+// Cached latest values so either subscription firing can re-identify with full data
+let _lastAuth: AuthSession | null = null;
+let _lastSub: SubscriptionInfo | null = null;
+
+function _syncIdentity(): void {
+  const user = _lastAuth?.user;
+  if (user) {
+    identifyUser(user.id, user.role, _lastSub?.status ?? null, _lastSub?.planKey ?? null);
+  } else {
+    _lastSub = null;
+    clearIdentity();
+  }
+}
+
+/**
+ * Call once after initAuthState() to keep Umami identity in sync with
+ * the authenticated user and their subscription status.
+ * Re-entrant safe: subsequent calls are no-ops.
+ */
+export function initAuthAnalytics(): void {
+  if (_unsubAuth) return;
+
+  _unsubAuth = subscribeAuthState((state) => {
+    const prevUserId = _lastAuth?.user?.id ?? null;
+    const nextUserId = state.user?.id ?? null;
+    if (prevUserId !== nextUserId) {
+      _lastSub = null;
+      // Detect a genuine sign-UP (not a sign-in). Null→non-null id transition
+      // plus a createdAt within FRESH_SIGNUP_WINDOW_MS of now means Clerk
+      // just created this account. Firing trackSignUp on the button click
+      // would conflate "opened the sign-up modal" with "completed the flow";
+      // gating on createdAt freshness captures the successful-completion
+      // signal we actually want to measure.
+      //
+      // Durable fire-once guard: `_lastAuth` resets to null on every page
+      // load, so without a persisted marker the null→user transition looks
+      // identical on the completion reload and on any reload within the
+      // 60s freshness window. We'd re-fire trackSignUp on every tab
+      // refresh until createdAt ages out, inflating the signup count.
+      // sessionStorage scopes the marker to the browser tab — tight enough
+      // that re-install / new session reliably re-counts, wide enough that
+      // a reload mid-signup doesn't double-count.
+      if (
+        nextUserId !== null &&
+        !hasTrackedSignupInSession(nextUserId) &&
+        isLikelyFreshSignup(prevUserId, nextUserId, getClerkUserCreatedAt(), Date.now())
+      ) {
+        trackSignUp('clerk');
+        markSignupTrackedInSession(nextUserId);
+      }
+    }
+    _lastAuth = state;
+    _syncIdentity();
+  });
+
+  _unsubBilling = onSubscriptionChange((sub) => {
+    _lastSub = sub;
+    _syncIdentity();
   });
 }
 
-export function trackLLMUsage(provider: string, model: string, cached: boolean): void {
-  trackEvent('wm_summary_generated', { provider, model, cached });
+/** Tear down auth + billing listeners. Symmetric with initAuthAnalytics(). */
+export function destroyAuthAnalytics(): void {
+  _unsubAuth?.();
+  _unsubBilling?.();
+  _unsubAuth = null;
+  _unsubBilling = null;
+  _lastAuth = null;
+  _lastSub = null;
+  clearIdentity();
 }
 
-export function trackLLMFailure(lastProvider: string): void {
-  trackEvent('wm_summary_failed', { last_provider: lastProvider });
+// ---------------------------------------------------------------------------
+// Auth events
+// ---------------------------------------------------------------------------
+
+export function trackSignIn(method: string): void {
+  track('sign-in', { method });
 }
 
-// ── Phase 2 helpers (plan-specified events) ──
-
-export function trackPanelResized(panelId: string, newSpan: number): void {
-  trackEvent('wm_panel_resized', { panel_id: panelId, new_span: newSpan });
+export function trackSignUp(method: string): void {
+  track('sign-up', { method });
 }
 
-export function trackVariantSwitch(from: string, to: string): void {
-  trackEventBeforeUnload('wm_variant_switched', { from, to });
+export function trackAnalystControlAction(actionType: string, status: string, reason?: string): void {
+  track('analyst-control-action', {
+    actionType,
+    status,
+    ...(reason ? { reason } : {}),
+  });
 }
 
-export function trackMapLayerToggle(layerId: string, enabled: boolean, source: 'user' | 'programmatic'): void {
-  trackEvent('wm_map_layer_toggled', { layer_id: layerId, enabled, source });
+/**
+ * Window during which a freshly-observed Clerk `createdAt` is treated
+ * as "this user just signed up." 60s is conservative enough to survive
+ * network jitter between Clerk's user.created and the client seeing
+ * the auth-state transition, while staying tight enough to reject
+ * returning-user sign-ins on accounts created weeks ago.
+ */
+export const FRESH_SIGNUP_WINDOW_MS = 60_000;
+
+/**
+ * Pure predicate: was the just-observed auth transition a fresh sign-up?
+ *
+ * Exported for testability. Do not read Date.now() or Clerk state from
+ * inside this function — callers pass both, so tests can pin time and
+ * user state.
+ */
+/**
+ * Lower bound for clock skew. A createdAt earlier-than-now by up to
+ * this amount is treated as "now" for freshness purposes — tolerates
+ * client clocks that lag the server. Bigger negatives (createdAt
+ * unrealistically far in the future) are rejected as malformed.
+ */
+const FRESH_SIGNUP_CLOCK_SKEW_MS = 5_000;
+
+/**
+ * localStorage-backed fire-once guard, keyed by user id. Originally used
+ * sessionStorage but sessionStorage is per-TAB — a user who signs up and
+ * then opens a second tab on the app within the 60s createdAt freshness
+ * window would fire a second trackSignUp from that fresh tab's
+ * `_lastAuth=null → user` transition. localStorage is shared across
+ * tabs in the same browser profile, so once any tab marks the user as
+ * tracked, no other tab for the same user will re-fire.
+ *
+ * Keyed per user id so account switches within the same browser still
+ * correctly track each user's first signup (rare but valid). The key
+ * never needs to be cleaned up because Clerk user ids are effectively
+ * unique forever — a deleted user's key is harmless and the storage
+ * footprint is trivial (one byte per user who ever signed up here).
+ *
+ * Read/write are try/catched because storage throws in private-mode /
+ * quota-exceeded / disabled scenarios; we fail open (track, don't
+ * persist) rather than swallow signups.
+ */
+const SIGNUP_TRACKED_KEY_PREFIX = 'wm-signup-tracked:';
+
+export function hasTrackedSignupInSession(userId: string): boolean {
+  try {
+    return window.localStorage.getItem(SIGNUP_TRACKED_KEY_PREFIX + userId) === '1';
+  } catch {
+    return false;
+  }
 }
 
-export function trackCountryBriefOpened(countryCode: string): void {
-  trackEvent('wm_country_brief_opened', { country_code: countryCode });
+export function markSignupTrackedInSession(userId: string): void {
+  try {
+    window.localStorage.setItem(SIGNUP_TRACKED_KEY_PREFIX + userId, '1');
+  } catch {
+    // Storage unavailable — we'll just risk a single double-count on
+    // reload instead of crashing analytics init.
+  }
 }
 
-export function trackThemeChanged(theme: string): void {
-  trackEventBeforeUnload('wm_theme_changed', { theme });
+export function isLikelyFreshSignup(
+  prevUserId: string | null,
+  nextUserId: string | null,
+  createdAtMs: number | null,
+  nowMs: number,
+): boolean {
+  if (prevUserId !== null) return false;
+  if (nextUserId === null) return false;
+  if (createdAtMs === null) return false;
+  const age = nowMs - createdAtMs;
+  // Accept:   -5s  ≤ age ≤ 60s  (brief clock skew tolerance + fresh window)
+  // Reject: < -5s (createdAt unrealistically far in the future — malformed)
+  //         > 60s (returning user, not a fresh signup)
+  return age >= -FRESH_SIGNUP_CLOCK_SKEW_MS && age <= FRESH_SIGNUP_WINDOW_MS;
 }
 
-export function trackLanguageChange(language: string): void {
-  trackEventBeforeUnload('wm_language_changed', { language });
+export function trackSignOut(): void {
+  track('sign-out');
 }
 
-export function trackFeatureToggle(featureId: string, enabled: boolean): void {
-  trackEvent('wm_feature_toggled', { feature_id: featureId, enabled });
+/**
+ * Test-only: reset module-level deferred-load state so each test starts from
+ * a clean slate. The queue and load guards are module singletons that persist
+ * across the shared module import in tests/secondary-startup.test.mts.
+ */
+export function resetAnalyticsForTesting(): void {
+  pendingUmamiCalls.length = 0;
+  umamiLoadScheduled = false;
+  umamiLoadStarted = false;
+  umamiLoadAttempts = 0;
 }
+
+export function trackGateHit(feature: string): void {
+  track('gate-hit', { feature });
+}
+
+// ---------------------------------------------------------------------------
+// Generic (kept as no-ops — too noisy / not useful in Umami)
+// ---------------------------------------------------------------------------
+
+export function trackEvent(_name: string, _props?: Record<string, unknown>): void {}
+export function trackEventBeforeUnload(_name: string, _props?: Record<string, unknown>): void {}
+export function trackPanelView(_panelId: string): void {}
+export function trackApiKeysSnapshot(): void {}
+export function trackUpdateShown(_current: string, _remote: string): void {}
+export function trackUpdateClicked(_version: string): void {}
+export function trackUpdateDismissed(_version: string): void {}
+export function trackDownloadBannerDismissed(): void {}
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
 
 export function trackSearchUsed(queryLength: number, resultCount: number): void {
-  trackEvent('wm_search_used', { query_length: queryLength, result_count: resultCount });
-}
-
-// ── Phase 2 helpers (additional interaction events) ──
-
-export function trackMapViewChange(view: string): void {
-  trackEvent('wm_map_view_changed', { view });
-}
-
-export function trackCountrySelected(code: string, name: string, source: string): void {
-  trackEvent('wm_country_selected', { country_code: code, country_name: name, source });
+  track('search-used', { queryLength, resultCount });
 }
 
 export function trackSearchResultSelected(resultType: string): void {
-  trackEvent('wm_search_result_selected', { result_type: resultType });
+  track('search-result-selected', { type: resultType });
 }
+
+// ---------------------------------------------------------------------------
+// Country / map
+// ---------------------------------------------------------------------------
+
+export function trackCountrySelected(code: string, name: string, source: string): void {
+  track('country-selected', { code, name, source });
+}
+
+export function trackCountryBriefOpened(countryCode: string): void {
+  track('country-brief-opened', { code: countryCode });
+}
+
+// ---------------------------------------------------------------------------
+// Brief thread-open (followed-countries plan, U11)
+// ---------------------------------------------------------------------------
+
+export type BriefThreadOpenSeverity =
+  | 'critical'
+  | 'high'
+  | 'medium'
+  | 'low'
+  | 'info'
+  | null;
+
+export interface BriefThreadOpenProps {
+  /** ISO-2 country code, or null when no primary country attaches. */
+  country: string | null;
+  /** True iff the user follows `country` at click time. */
+  followed: boolean;
+  severity: BriefThreadOpenSeverity;
+  /** Where the click originated. */
+  source: 'dashboard' | 'magazine';
+}
+
+/**
+ * Fire-and-forget: `track` short-circuits when Umami hasn't loaded.
+ * Wrap call sites in try/catch anyway so a future regression in
+ * `track` (e.g. throwing identify) cannot break navigation UX.
+ */
+export function trackBriefThreadOpen(props: BriefThreadOpenProps): void {
+  track('brief-thread-open', {
+    country: props.country,
+    followed: props.followed,
+    severity: props.severity,
+    source: props.source,
+  });
+}
+
+export function trackMapLayerToggle(layerId: string, enabled: boolean, source: 'user' | 'programmatic'): void {
+  if (source !== 'user') return;
+  track('map-layer-toggle', { layerId, enabled });
+}
+
+export function trackMapViewChange(_view: string): void {
+  // No-op: low analytical value.
+}
+
+// ---------------------------------------------------------------------------
+// Panels
+// ---------------------------------------------------------------------------
 
 export function trackPanelToggled(panelId: string, enabled: boolean): void {
-  trackEvent('wm_panel_toggled', { panel_id: panelId, enabled });
+  track('panel-toggle', { panelId, enabled });
 }
 
-export function trackFindingClicked(id: string, source: string, type: string, priority: string): void {
-  trackEvent('wm_finding_clicked', { finding_id: id, finding_source: source, finding_type: type, priority });
+export function trackPanelResized(_panelId: string, _newSpan: number): void {
+  // No-op: fires on every drag step, too noisy for analytics.
 }
 
-export function trackUpdateShown(current: string, remote: string): void {
-  trackEvent('wm_update_shown', { current_version: current, remote_version: remote });
+// ---------------------------------------------------------------------------
+// App-wide settings
+// ---------------------------------------------------------------------------
+
+export function trackVariantSwitch(from: string, to: string): void {
+  track('variant-switch', { from, to });
 }
 
-export function trackUpdateClicked(version: string): void {
-  trackEvent('wm_update_clicked', { target_version: version });
+export function trackThemeChanged(theme: string): void {
+  track('theme-changed', { theme });
 }
 
-export function trackUpdateDismissed(version: string): void {
-  trackEvent('wm_update_dismissed', { target_version: version });
+export function trackLanguageChange(language: string): void {
+  track('language-change', { language });
 }
 
-export function trackCriticalBannerAction(action: string, theaterId: string): void {
-  trackEvent('wm_critical_banner_action', { action, theater_id: theaterId });
+export function trackFeatureToggle(featureId: string, enabled: boolean): void {
+  track('feature-toggle', { featureId, enabled });
 }
 
-export function trackDownloadClicked(platform: string): void {
-  trackEvent('wm_download_clicked', { platform });
+// ---------------------------------------------------------------------------
+// AI / LLM
+// ---------------------------------------------------------------------------
+
+export function trackLLMUsage(_provider: string, _model: string, _cached: boolean): void {
+  // No-op: per-request noise, not a meaningful user action for analytics.
 }
 
-export function trackDownloadBannerDismissed(): void {
-  trackEvent('wm_download_banner_dismissed');
+export function trackLLMFailure(_lastProvider: string): void {
+  // No-op: per-request noise, not a meaningful user action for analytics.
 }
+
+// ---------------------------------------------------------------------------
+// Webcams
+// ---------------------------------------------------------------------------
 
 export function trackWebcamSelected(webcamId: string, city: string, viewMode: string): void {
-  trackEvent('wm_webcam_selected', { webcam_id: webcamId, city, view_mode: viewMode });
+  track('webcam-selected', { webcamId, city, viewMode });
 }
 
 export function trackWebcamRegionFiltered(region: string): void {
-  trackEvent('wm_webcam_region_filtered', { region });
+  track('webcam-region-filter', { region });
 }
 
-export function trackDeeplinkOpened(type: string, target: string): void {
-  trackEvent('wm_deeplink_opened', { deeplink_type: type, target });
+// ---------------------------------------------------------------------------
+// Downloads / banners / findings
+// ---------------------------------------------------------------------------
+
+export function trackDownloadClicked(platform: string): void {
+  track('download-clicked', { platform });
+}
+
+export function trackCriticalBannerAction(action: string, theaterId: string): void {
+  track('critical-banner', { action, theaterId });
+}
+
+export function trackFindingClicked(_id: string, _source: string, _type: string, _priority: string): void {
+  // No-op: niche feature, low analytical value.
+}
+
+export function trackDeeplinkOpened(_type: string, _target: string): void {
+  // No-op: not useful for analytics.
 }

@@ -9,8 +9,8 @@ import type {
   GetCountryStockIndexResponse,
 } from '../../../../src/generated/server/worldmonitor/market/v1/service_server';
 import { UPSTREAM_TIMEOUT_MS, type YahooChartResponse } from './_shared';
-import { CHROME_UA } from '../../../_shared/constants';
-import { getCachedJson, setCachedJson } from '../../../_shared/redis';
+import { CHROME_UA, yahooGate } from '../../../_shared/constants';
+import { cachedFetchJson } from '../../../_shared/redis';
 
 // ========================================================================
 // Country-to-index mapping
@@ -71,7 +71,7 @@ const COUNTRY_INDEX: Record<string, { symbol: string; name: string }> = {
 const REDIS_CACHE_KEY = 'market:stock-index:v1';
 const REDIS_CACHE_TTL = 1800; // 30 min — weekly data, slow-moving
 
-let stockIndexCache: Record<string, { data: GetCountryStockIndexResponse; ts: number }> = {};
+const stockIndexCache: Record<string, { data: GetCountryStockIndexResponse; ts: number }> = {};
 const STOCK_INDEX_CACHE_TTL = 3_600_000; // 1 hour (in-memory fallback)
 
 // ========================================================================
@@ -95,39 +95,35 @@ export async function getCountryStockIndex(
   const cached = stockIndexCache[code];
   if (cached && Date.now() - cached.ts < STOCK_INDEX_CACHE_TTL) return cached.data;
 
-  // Layer 2: Redis shared cache (cross-instance)
   const redisKey = `${REDIS_CACHE_KEY}:${code}`;
-  const redisCached = (await getCachedJson(redisKey)) as GetCountryStockIndexResponse | null;
-  if (redisCached?.available) {
-    stockIndexCache[code] = { data: redisCached, ts: Date.now() };
-    return redisCached;
-  }
 
   try {
+  const result = await cachedFetchJson<GetCountryStockIndexResponse>(redisKey, REDIS_CACHE_TTL, async () => {
     const encodedSymbol = encodeURIComponent(index.symbol);
     const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodedSymbol}?range=1mo&interval=1d`;
 
+    await yahooGate();
     const res = await fetch(yahooUrl, {
       headers: { 'User-Agent': CHROME_UA },
       signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
     });
 
-    if (!res.ok) return notAvailable;
+    if (!res.ok) return null;
 
     const data: YahooChartResponse = await res.json();
-    const result = data?.chart?.result?.[0];
-    if (!result) return notAvailable;
+    const chartResult = data?.chart?.result?.[0];
+    if (!chartResult) return null;
 
-    const allCloses = result.indicators?.quote?.[0]?.close?.filter((v): v is number => v != null);
-    if (!allCloses || allCloses.length < 2) return notAvailable;
+    const allCloses = chartResult.indicators?.quote?.[0]?.close?.filter((v): v is number => v != null);
+    if (!allCloses || allCloses.length < 2) return null;
 
     const closes = allCloses.slice(-6);
     const latest = closes[closes.length - 1]!;
     const oldest = closes[0]!;
     const weekChange = ((latest - oldest) / oldest) * 100;
-    const meta = result.meta || {};
+    const meta = chartResult.meta || {};
 
-    const payload: GetCountryStockIndexResponse = {
+    return {
       available: true,
       code,
       symbol: index.symbol,
@@ -137,11 +133,14 @@ export async function getCountryStockIndex(
       currency: (meta as { currency?: string }).currency || 'USD',
       fetchedAt: new Date().toISOString(),
     };
+  });
 
-    stockIndexCache[code] = { data: payload, ts: Date.now() };
-    setCachedJson(redisKey, payload, REDIS_CACHE_TTL).catch(() => {});
-    return payload;
+  if (result?.available) {
+    stockIndexCache[code] = { data: result, ts: Date.now() };
+  }
+
+  return result || stockIndexCache[code]?.data || notAvailable;
   } catch {
-    return notAvailable;
+    return stockIndexCache[code]?.data || notAvailable;
   }
 }

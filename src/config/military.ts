@@ -41,6 +41,34 @@ export const US_MILITARY_CALLSIGNS: CallsignPattern[] = [
   { pattern: '^EVAC', operator: 'usaf', aircraftType: 'transport', description: 'Aeromedical evacuation' },
   { pattern: '^MOOSE', operator: 'usaf', aircraftType: 'transport', description: 'C-17 operations' },
   { pattern: '^HERKY', operator: 'usaf', aircraftType: 'transport', description: 'C-130 operations' },
+  { pattern: '^ATLAS', operator: 'usaf', aircraftType: 'transport', description: 'C-17 strategic airlift' },
+  { pattern: '^HERC(?!KY)', operator: 'usaf', aircraftType: 'transport', description: 'C-130 Hercules' },
+  { pattern: '^STEEL', operator: 'usaf', aircraftType: 'transport', description: 'USAF transport/tanker' },
+  { pattern: '^CASA', operator: 'usaf', aircraftType: 'transport', description: 'C-295/CN-235 tactical transport' },
+  { pattern: '^COMET', operator: 'usaf', aircraftType: 'transport', description: 'USAF transport' },
+  { pattern: '^TITAN', operator: 'usaf', aircraftType: 'transport', description: 'Heavy airlift' },
+  { pattern: '^SPAR', operator: 'usaf', aircraftType: 'vip', description: 'Special Priority Air Resource (VIP)' },
+  { pattern: '^IRON', operator: 'usaf', description: 'USAF operations' },
+  { pattern: '^HOMER', operator: 'usaf', description: 'USAF operations' },
+  { pattern: '^SCORE', operator: 'usaf', description: 'USAF operations' },
+  { pattern: '^TOPCT', operator: 'usaf', aircraftType: 'tanker', description: 'KC-135/KC-46 tanker' },
+  { pattern: '^KNIFE', operator: 'usaf', aircraftType: 'special_ops', description: 'AC-130/MC-130 special ops' },
+  { pattern: '^CSAR', operator: 'usaf', aircraftType: 'helicopter', description: 'Combat search and rescue' },
+  { pattern: '^NITE', operator: 'usaf', aircraftType: 'special_ops', description: 'Night operations' },
+  { pattern: '^PACK', operator: 'usaf', aircraftType: 'fighter', description: 'Fighter/tactical ops' },
+  { pattern: '^DAGGER', operator: 'usaf', aircraftType: 'fighter', description: 'Fighter/special ops' },
+  { pattern: '^DEMON', operator: 'usaf', aircraftType: 'fighter', description: 'Fighter operations' },
+  { pattern: '^GHOST', operator: 'usaf', aircraftType: 'bomber', description: 'B-2 Spirit / stealth ops' },
+  { pattern: '^LANCE', operator: 'usaf', aircraftType: 'fighter', description: 'Fighter operations' },
+  { pattern: '^REBEL', operator: 'usaf', aircraftType: 'fighter', description: 'Fighter operations' },
+  { pattern: '^SKULL', operator: 'usaf', aircraftType: 'fighter', description: 'Fighter/bomber ops' },
+  { pattern: '^STORM', operator: 'usaf', aircraftType: 'fighter', description: 'Tactical operations' },
+  { pattern: '^SWORD', operator: 'usaf', aircraftType: 'fighter', description: 'Fighter operations' },
+  { pattern: '^WOLF', operator: 'usaf', aircraftType: 'fighter', description: 'Fighter/special ops' },
+  { pattern: '^RAGE', operator: 'usaf', aircraftType: 'fighter', description: 'Fighter/bomber ops' },
+  { pattern: '^THUD', operator: 'usaf', aircraftType: 'fighter', description: 'Tactical fighter' },
+  { pattern: '^ODIN', operator: 'usaf', description: 'USAF operations' },
+  { pattern: '^WRATH', operator: 'usaf', aircraftType: 'bomber', description: 'Bomber operations' },
 
   // US Navy
   { pattern: '^NAVY', operator: 'usn', description: 'US Navy aircraft' },
@@ -49,6 +77,9 @@ export const US_MILITARY_CALLSIGNS: CallsignPattern[] = [
   { pattern: '^TRIDENT', operator: 'usn', aircraftType: 'patrol', description: 'P-8 maritime patrol' },
   { pattern: '^RED', operator: 'usn', aircraftType: 'patrol', description: 'P-8/P-3 operations' },
   { pattern: '^BRONCO', operator: 'usn', aircraftType: 'fighter', description: 'F/A-18 operations' },
+  { pattern: '^RHINO', operator: 'usn', aircraftType: 'fighter', description: 'F/A-18E/F Super Hornet' },
+  { pattern: '^BOXER', operator: 'usn', description: 'USN operations' },
+  { pattern: '^ORCA', operator: 'usn', description: 'USN operations' },
 
   // US Marine Corps
   { pattern: '^MARINE', operator: 'usmc', description: 'USMC aircraft' },
@@ -59,6 +90,7 @@ export const US_MILITARY_CALLSIGNS: CallsignPattern[] = [
   { pattern: '^ARMY', operator: 'usa', description: 'US Army aircraft' },
   { pattern: '^PAT', operator: 'usa', aircraftType: 'transport', description: 'Priority air transport' },
   { pattern: '^DUSTOFF', operator: 'usa', aircraftType: 'helicopter', description: 'Medevac helicopters' },
+  { pattern: '^PUMA', operator: 'usa', aircraftType: 'helicopter', description: 'Army helicopter ops' },
 
   // US Coast Guard
   { pattern: '^COAST GUARD', operator: 'other', aircraftType: 'patrol', description: 'USCG aircraft' },
@@ -99,6 +131,7 @@ export const NATO_ALLIED_CALLSIGNS: CallsignPattern[] = [
   // Turkey
   { pattern: '^THK', operator: 'other', description: 'Turkish Air Force' },
   { pattern: '^TUR', operator: 'other', description: 'Turkish military' },
+  { pattern: '^TUAF', operator: 'other', description: 'Turkish Air Force' },
 
   // Saudi Arabia
   { pattern: '^SVA', operator: 'other', description: 'Saudi Air Force' },
@@ -107,9 +140,13 @@ export const NATO_ALLIED_CALLSIGNS: CallsignPattern[] = [
   // UAE
   { pattern: '^UAF', operator: 'other', description: 'UAE Air Force' },
 
+  // Qatar
+  { pattern: '^QAF', operator: 'other', description: 'Qatar Air Force' },
+
   // India
   { pattern: '^AIR INDIA ONE', operator: 'other', aircraftType: 'vip', description: 'Indian Air Force One' },
   { pattern: '^IAM', operator: 'other', description: 'Indian Air Force' },
+  { pattern: '^INDIA[0-9]', operator: 'other', description: 'Indian military (INDIA + flight number)' },
 
   // Japan ASDF
   { pattern: '^JPN', operator: 'other', description: 'Japan Self-Defense Force' },
@@ -126,13 +163,31 @@ export const NATO_ALLIED_CALLSIGNS: CallsignPattern[] = [
   // Canada
   { pattern: '^CANFORCE', operator: 'other', aircraftType: 'transport', description: 'Canadian Armed Forces' },
   { pattern: '^CFC', operator: 'other', description: 'Canadian Forces' },
+  { pattern: '^CAAF', operator: 'other', description: 'Canadian Armed Forces air' },
 
   // Italy
   { pattern: '^IAM', operator: 'other', description: 'Italian Air Force' },
   { pattern: '^ITALY', operator: 'other', description: 'Italian military' },
+  { pattern: '^MMF', operator: 'other', description: 'Italian Aeronautica Militare' },
+
+  // France (alternate)
+  { pattern: '^FRAF', operator: 'faf', description: 'French Air Force' },
 
   // Spain
   { pattern: '^AME', operator: 'other', description: 'Spanish Air Force' },
+
+  // Belgium
+  { pattern: '^BAF', operator: 'other', description: 'Belgian Air Force' },
+
+  // Norway
+  { pattern: '^NAF', operator: 'other', description: 'Norwegian Air Force' },
+  { pattern: '^NOAF', operator: 'other', description: 'Norwegian Air Force' },
+
+  // Denmark
+  { pattern: '^DNAF', operator: 'other', description: 'Danish Air Force' },
+
+  // Romania
+  { pattern: '^ROF', operator: 'other', description: 'Romanian Air Force' },
 
   // Poland
   { pattern: '^PLF', operator: 'other', description: 'Polish Air Force' },
@@ -281,41 +336,42 @@ export const MILITARY_AIRCRAFT_TYPES: Record<string, { type: MilitaryAircraftTyp
  * Reference: https://www.ads-b.nl/icao.php
  */
 export const MILITARY_HEX_RANGES: { start: string; end: string; operator: MilitaryOperator; country: string }[] = [
-  // United States Military (largest block)
-  { start: 'ADF7C7', end: 'ADF7CF', operator: 'usaf', country: 'USA' }, // Known USAF tankers
-  { start: 'AE0000', end: 'AFFFFF', operator: 'usaf', country: 'USA' }, // Main USAF block
-  { start: 'A00000', end: 'A3FFFF', operator: 'usaf', country: 'USA' }, // Additional US military
+  // United States DoD — civil N-numbers end at ADF7C7; everything above is military
+  { start: 'ADF7C8', end: 'AFFFFF', operator: 'usaf', country: 'USA' },
 
-  // UK Military
+  // UK Military (small block at start + main RAF block)
+  { start: '400000', end: '40003F', operator: 'raf', country: 'UK' },
   { start: '43C000', end: '43CFFF', operator: 'raf', country: 'UK' },
 
-  // France Military
-  { start: '3A0000', end: '3AFFFF', operator: 'faf', country: 'France' },
-  { start: '3B0000', end: '3BFFFF', operator: 'faf', country: 'France' },
+  // France Military (two sub-blocks within 380000-3BFFFF)
+  { start: '3AA000', end: '3AFFFF', operator: 'faf', country: 'France' },
+  { start: '3B7000', end: '3BFFFF', operator: 'faf', country: 'France' },
 
-  // Germany Military
-  { start: '3F0000', end: '3FFFFF', operator: 'gaf', country: 'Germany' },
+  // Germany Military (two sub-blocks within 3C0000-3FFFFF)
+  { start: '3EA000', end: '3EBFFF', operator: 'gaf', country: 'Germany' },
+  { start: '3F4000', end: '3FBFFF', operator: 'gaf', country: 'Germany' },
 
-  // Israel Military (critical for Middle East)
-  { start: '738000', end: '73FFFF', operator: 'iaf', country: 'Israel' },
+  // Israel Military (confirmed IAF sub-range within 738000-73FFFF)
+  { start: '738A00', end: '738BFF', operator: 'iaf', country: 'Israel' },
 
   // NATO AWACS (Luxembourg registration but NATO operated)
   { start: '4D0000', end: '4D03FF', operator: 'nato', country: 'NATO' },
 
-  // Italy Military
-  { start: '300000', end: '33FFFF', operator: 'other', country: 'Italy' },
+  // Italy Military (top of 300000-33FFFF block)
+  { start: '33FF00', end: '33FFFF', operator: 'other', country: 'Italy' },
 
-  // Spain Military
-  { start: '340000', end: '37FFFF', operator: 'other', country: 'Spain' },
+  // Spain Military (upper 3/4 of 340000-37FFFF; civilian in 340000-34FFFF)
+  { start: '350000', end: '37FFFF', operator: 'other', country: 'Spain' },
 
   // Netherlands Military
   { start: '480000', end: '480FFF', operator: 'other', country: 'Netherlands' },
 
-  // Turkey Military (important for Middle East)
-  { start: '4BA000', end: '4BCFFF', operator: 'other', country: 'Turkey' },
+  // Turkey Military (confirmed sub-range within 4B8000-4BFFFF)
+  { start: '4B8200', end: '4B82FF', operator: 'other', country: 'Turkey' },
 
-  // Saudi Arabia Military
-  { start: '710000', end: '717FFF', operator: 'other', country: 'Saudi Arabia' },
+  // Saudi Arabia Military (two small confirmed sub-blocks)
+  { start: '710258', end: '71028F', operator: 'other', country: 'Saudi Arabia' },
+  { start: '710380', end: '71039F', operator: 'other', country: 'Saudi Arabia' },
 
   // UAE Military
   { start: '896000', end: '896FFF', operator: 'other', country: 'UAE' },
@@ -326,41 +382,38 @@ export const MILITARY_HEX_RANGES: { start: string; end: string; operator: Milita
   // Kuwait Military
   { start: '706000', end: '706FFF', operator: 'other', country: 'Kuwait' },
 
-  // Japan Self-Defense Forces
-  { start: '840000', end: '87FFFF', operator: 'other', country: 'Japan' },
+  // Australia Military (confirmed RAAF sub-range)
+  { start: '7CF800', end: '7CFAFF', operator: 'other', country: 'Australia' },
 
-  // South Korea Military
-  { start: '718000', end: '71FFFF', operator: 'other', country: 'South Korea' },
+  // Canada Military (upper half of C00000-C3FFFF)
+  { start: 'C20000', end: 'C3FFFF', operator: 'other', country: 'Canada' },
 
-  // Australia Military
-  { start: '7CF800', end: '7CFFFF', operator: 'other', country: 'Australia' },
+  // India Military (confirmed IAF sub-range within 800000-83FFFF)
+  { start: '800200', end: '8002FF', operator: 'other', country: 'India' },
 
-  // Canada Military
-  { start: 'C00000', end: 'C0FFFF', operator: 'other', country: 'Canada' },
+  // Egypt Military (confirmed sub-range)
+  { start: '010070', end: '01008F', operator: 'other', country: 'Egypt' },
 
-  // India Military
-  { start: '800000', end: '83FFFF', operator: 'other', country: 'India' },
+  // Poland Military (confirmed sub-range within 488000-48FFFF)
+  { start: '48D800', end: '48D87F', operator: 'other', country: 'Poland' },
 
-  // Pakistan Military
-  { start: '760000', end: '767FFF', operator: 'other', country: 'Pakistan' },
+  // Greece Military (confirmed sub-range at start of 468000-46FFFF)
+  { start: '468000', end: '4683FF', operator: 'other', country: 'Greece' },
 
-  // Egypt Military
-  { start: '500000', end: '5003FF', operator: 'other', country: 'Egypt' },
+  // Norway Military (confirmed sub-range within 478000-47FFFF)
+  { start: '478100', end: '4781FF', operator: 'other', country: 'Norway' },
 
-  // Poland Military
-  { start: '488000', end: '48FFFF', operator: 'other', country: 'Poland' },
+  // Austria Military
+  { start: '444000', end: '446FFF', operator: 'other', country: 'Austria' },
 
-  // Greece Military
-  { start: '468000', end: '46FFFF', operator: 'other', country: 'Greece' },
+  // Belgium Military
+  { start: '44F000', end: '44FFFF', operator: 'other', country: 'Belgium' },
 
-  // Sweden Military
-  { start: '4A8000', end: '4AFFFF', operator: 'other', country: 'Sweden' },
+  // Switzerland Military
+  { start: '4B7000', end: '4B7FFF', operator: 'other', country: 'Switzerland' },
 
-  // Norway Military
-  { start: '478000', end: '47FFFF', operator: 'other', country: 'Norway' },
-
-  // Singapore Military
-  { start: '768000', end: '76FFFF', operator: 'other', country: 'Singapore' },
+  // Brazil Military
+  { start: 'E40000', end: 'E41FFF', operator: 'other', country: 'Brazil' },
 ];
 
 /**
@@ -454,6 +507,29 @@ export const MILITARY_HOTSPOTS = [
   { name: 'ARCTIC', lat: 75.0, lon: 0.0, radius: 10, priority: 'low' },
 ] as const;
 
+export interface QueryRegion {
+  name: string;
+  lamin: number;
+  lamax: number;
+  lomin: number;
+  lomax: number;
+}
+
+export const MILITARY_QUERY_REGIONS: QueryRegion[] = [
+  { name: 'PACIFIC', lamin: 10, lamax: 46, lomin: 107, lomax: 143 },
+  { name: 'WESTERN', lamin: 13, lamax: 85, lomin: -10, lomax: 57 },
+];
+
+if (import.meta.env.DEV) {
+  for (const h of MILITARY_HOTSPOTS) {
+    const hbox = { lamin: h.lat - h.radius, lamax: h.lat + h.radius, lomin: h.lon - h.radius, lomax: h.lon + h.radius };
+    const covered = MILITARY_QUERY_REGIONS.some(r =>
+      r.lamin <= hbox.lamin && r.lamax >= hbox.lamax && r.lomin <= hbox.lomin && r.lomax >= hbox.lomax
+    );
+    if (!covered) console.error(`[Military] HOTSPOT ${h.name} bbox not covered by any QUERY_REGION`);
+  }
+}
+
 export const USNI_REGION_COORDINATES: Record<string, { lat: number; lon: number }> = {
   // Seas & Oceans
   'Philippine Sea': { lat: 18.0, lon: 130.0 },
@@ -505,6 +581,53 @@ export const USNI_REGION_COORDINATES: Record<string, { lat: number; lon: number 
   'Bangor': { lat: 47.73, lon: -122.71 },
   'Djibouti': { lat: 11.55, lon: 43.15 },
   'Singapore': { lat: 1.35, lon: 103.82 },
+  // Additional homeports / shipyards
+  'Newport News': { lat: 37.00, lon: -76.43 },      // Huntington Ingalls / NNSY — carrier RCOH
+  'Puget Sound': { lat: 47.57, lon: -122.63 },       // alias for Bremerton / PSNS
+  'Naval Station Kitsap': { lat: 47.57, lon: -122.63 },
+  'Kitsap': { lat: 47.57, lon: -122.63 },
+  'Portsmouth': { lat: 43.07, lon: -70.76 },         // Portsmouth Naval Shipyard (Kittery, ME — submarine)
+  'Groton': { lat: 41.35, lon: -72.09 },             // Naval Submarine Base New London
+  'New London': { lat: 41.35, lon: -72.09 },
+  'Pascagoula': { lat: 30.37, lon: -88.55 },         // Ingalls shipbuilding
+  'Jacksonville': { lat: 30.39, lon: -81.40 },       // NAS Jax / Mayport area
+  'Pensacola': { lat: 30.35, lon: -87.30 },
+  'Corpus Christi': { lat: 27.80, lon: -97.40 },
+  'Deveselu': { lat: 44.10, lon: 24.09 },            // NATO BMD site, Romania
+};
+
+/**
+ * Fallback homeport lookup keyed by normalized hull number (e.g. "CVN-68").
+ * Used when deploymentStatus === 'in-port' but the USNI article text doesn't
+ * explicitly name the port.  Only covers ships whose homeports are stable and
+ * well-documented; keep this list concise — Option A (parsed homePort text)
+ * is preferred and this is the fallback.
+ * Last verified: March 2026 (USNI Fleet Tracker)
+ */
+export const HULL_HOMEPORT: Record<string, string> = {
+  // Aircraft Carriers
+  'CVN-68': 'Bremerton',        // USS Nimitz — Naval Station Kitsap / PSNS RCOH
+  'CVN-69': 'Norfolk',          // USS Dwight D. Eisenhower
+  'CVN-70': 'San Diego',        // USS Carl Vinson
+  'CVN-71': 'San Diego',        // USS Theodore Roosevelt
+  'CVN-72': 'Everett',          // USS Abraham Lincoln — Naval Station Everett
+  'CVN-73': 'Norfolk',          // USS George Washington — returned from Newport News RCOH
+  'CVN-74': 'Bremerton',        // USS John C. Stennis — PSNS RCOH
+  'CVN-75': 'Norfolk',          // USS Harry S. Truman
+  'CVN-76': 'San Diego',        // USS Ronald Reagan — returning from Yokosuka
+  'CVN-77': 'Norfolk',          // USS George H.W. Bush
+  'CVN-78': 'Norfolk',          // USS Gerald R. Ford
+  'CVN-79': 'Norfolk',          // USS John F. Kennedy — commissioning
+  // Amphibious Assault
+  'LHD-1': 'Norfolk',           // USS Wasp
+  'LHD-2': 'Sasebo',            // USS Essex — forward deployed Japan
+  'LHD-3': 'Norfolk',           // USS Kearsarge
+  'LHD-4': 'San Diego',         // USS Boxer
+  'LHD-5': 'Norfolk',           // USS Bataan
+  'LHD-7': 'Norfolk',           // USS Iwo Jima
+  'LHD-8': 'San Diego',         // USS Makin Island
+  'LHA-6': 'San Diego',         // USS America
+  'LHA-7': 'San Diego',         // USS Tripoli
 };
 
 export function normalizeUSNIRegion(regionText: string): string {
@@ -603,7 +726,7 @@ export function isKnownMilitaryHex(hexCode: string): { operator: MilitaryOperato
  */
 export function getNearbyHotspot(lat: number, lon: number): typeof MILITARY_HOTSPOTS[number] | undefined {
   for (const hotspot of MILITARY_HOTSPOTS) {
-    const distance = Math.sqrt(Math.pow(lat - hotspot.lat, 2) + Math.pow(lon - hotspot.lon, 2));
+    const distance = Math.sqrt((lat - hotspot.lat) ** 2 + (lon - hotspot.lon) ** 2);
     if (distance <= hotspot.radius) {
       return hotspot;
     }

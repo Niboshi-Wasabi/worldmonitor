@@ -7,9 +7,12 @@ import {
   calculateCascade,
   getGraphStats,
   clearGraphCache,
+  preloadCables,
   type DependencyGraph,
 } from '@/services/infrastructure-cascade';
 import type { CascadeResult, CascadeImpactLevel, InfrastructureNode } from '@/types';
+import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+
 
 type NodeFilter = 'all' | 'cable' | 'pipeline' | 'port' | 'chokepoint';
 
@@ -28,12 +31,14 @@ export class CascadePanel extends Panel {
       trackActivity: true,
       infoTooltip: t('components.cascade.infoTooltip'),
     });
+    this.setupDelegatedListeners();
     this.init();
   }
 
   private async init(): Promise<void> {
     this.showLoading();
     try {
+      await preloadCables();
       this.graph = buildDependencyGraph();
       const stats = getGraphStats();
       this.setCount(stats.nodes);
@@ -99,7 +104,7 @@ export class CascadePanel extends Panel {
   private renderSelector(): string {
     const nodes = this.getFilteredNodes();
     const filterButtons = ['cable', 'pipeline', 'port', 'chokepoint'].map((f) =>
-      `<button class="cascade-filter-btn ${this.filter === f ? 'active' : ''}" data-filter="${f}">
+      `<button class="panel-tab ${this.filter === f ? 'active' : ''}" data-filter="${f}" role="radio" aria-checked="${this.filter === f}" aria-label="${this.getFilterLabel(f as Exclude<NodeFilter, 'all'>)}">
         ${this.getNodeTypeEmoji(f)} ${this.getFilterLabel(f as Exclude<NodeFilter, 'all'>)}
       </button>`
     ).join('');
@@ -113,8 +118,8 @@ export class CascadePanel extends Panel {
 
     return `
       <div class="cascade-selector">
-        <div class="cascade-filters">${filterButtons}</div>
-        <select class="cascade-select" ${nodes.length === 0 ? 'disabled' : ''}>
+        <div class="panel-tabs" role="radiogroup" aria-label="Infrastructure type filter">${filterButtons}</div>
+        <select class="cascade-select" aria-label="${t('components.cascade.selectInfrastructureHint')}" ${nodes.length === 0 ? 'disabled' : ''}>
           <option value="">${t('components.cascade.selectPrompt', { type: selectedType })}</option>
           ${nodeOptions}
         </select>
@@ -189,44 +194,49 @@ export class CascadePanel extends Panel {
       </div>
     `;
 
-    this.content.innerHTML = `
+    setTrustedHtml(this.content, trustedHtml(`
       <div class="cascade-panel">
         ${statsHtml}
         ${this.renderSelector()}
         ${this.cascadeResult ? this.renderCascadeResult() : `<div class="cascade-hint">${t('components.cascade.selectInfrastructureHint')}</div>`}
       </div>
-    `;
-
-    this.attachEventListeners();
+    `, "legacy direct innerHTML migration"));
   }
 
-  private attachEventListeners(): void {
-    const filterBtns = this.content.querySelectorAll('.cascade-filter-btn');
-    filterBtns.forEach(btn => {
-      btn.addEventListener('click', () => {
-        this.filter = btn.getAttribute('data-filter') as NodeFilter;
+  /**
+   * Attach delegated event listeners once on the container so that
+   * re-renders (which replace innerHTML) never accumulate listeners.
+   */
+  private setupDelegatedListeners(): void {
+    this.content.addEventListener('click', (e: Event) => {
+      const target = e.target as HTMLElement;
+
+      const filterBtn = target.closest<HTMLElement>('.panel-tab');
+      if (filterBtn) {
+        this.filter = filterBtn.getAttribute('data-filter') as NodeFilter;
         this.selectedNode = null;
         this.cascadeResult = null;
         this.render();
-      });
+        return;
+      }
+
+      if (target.closest('.cascade-analyze-btn')) {
+        this.runAnalysis();
+      }
     });
 
-    const select = this.content.querySelector('.cascade-select') as HTMLSelectElement;
-    if (select) {
-      select.addEventListener('change', () => {
+    this.content.addEventListener('change', (e: Event) => {
+      const target = e.target as HTMLElement;
+      if (target.closest('.cascade-select')) {
+        const select = target as HTMLSelectElement;
         this.selectedNode = select.value || null;
         this.cascadeResult = null;
         if (this.onSelectCallback) {
           this.onSelectCallback(this.selectedNode);
         }
         this.render();
-      });
-    }
-
-    const analyzeBtn = this.content.querySelector('.cascade-analyze-btn');
-    if (analyzeBtn) {
-      analyzeBtn.addEventListener('click', () => this.runAnalysis());
-    }
+      }
+    });
   }
 
   private runAnalysis(): void {

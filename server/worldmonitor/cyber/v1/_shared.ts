@@ -13,9 +13,6 @@
  * No caching in handler (client-side polling manages refresh intervals).
  * GeoIP hydration uses in-memory cache for resolved IPs within a process lifetime.
  */
-
-declare const process: { env: Record<string, string | undefined> };
-
 import type {
   CyberThreat,
   CyberThreatType,
@@ -41,21 +38,18 @@ const C2INTEL_URL = 'https://raw.githubusercontent.com/drb-ra/C2IntelFeeds/maste
 const OTX_INDICATORS_URL = 'https://otx.alienvault.com/api/v1/indicators/export?type=IPv4&modified_since=';
 const ABUSEIPDB_BLACKLIST_URL = 'https://api.abuseipdb.com/api/v2/blacklist';
 
-const UPSTREAM_TIMEOUT_MS = 8000;
-const GEO_MAX_UNRESOLVED = 250;
-const GEO_CONCURRENCY = 16;
-const GEO_OVERALL_TIMEOUT_MS = 15_000;
-const GEO_PER_IP_TIMEOUT_MS = 3000;
+const UPSTREAM_TIMEOUT_MS = 7000;
+const GEO_MAX_UNRESOLVED = 200;
+const GEO_CONCURRENCY = 12;
+const GEO_OVERALL_TIMEOUT_MS = 12_000;
+const GEO_PER_IP_TIMEOUT_MS = 1500;
 const GEO_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 // ========================================================================
 // Helper utilities
 // ========================================================================
 
-export function clampInt(value: number | undefined, fallback: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(value as number)));
-}
+export { clampInt } from '../../../_shared/constants';
 
 function cleanString(value: unknown, maxLen = 120): string {
   if (typeof value !== 'string') return '';
@@ -193,12 +187,20 @@ const COUNTRY_CENTROIDS: Record<string, [number, number]> = {
   SN:[14.5,-14.5],CM:[7.4,12.4],CI:[7.5,-5.5],TZ:[-6.4,34.9],UG:[1.4,32.3],
 };
 
-function getCountryCentroid(countryCode: string): { lat: number; lon: number } | null {
+function djb2(seed: string): number {
+  let h = 5381;
+  for (let i = 0; i < seed.length; i++) h = ((h << 5) + h + seed.charCodeAt(i)) & 0xffffffff;
+  return h;
+}
+
+function getCountryCentroid(countryCode: string, seed?: string): { lat: number; lon: number } | null {
   if (!countryCode) return null;
   const coords = COUNTRY_CENTROIDS[countryCode.toUpperCase()];
   if (!coords) return null;
-  const jitter = () => (Math.random() - 0.5) * 2;
-  return { lat: coords[0] + jitter(), lon: coords[1] + jitter() };
+  const key = seed || countryCode;
+  const latOffset = (((djb2(key) & 0xffff) / 0xffff) - 0.5) * 2;
+  const lonOffset = (((djb2(key + ':lon') & 0xffff) / 0xffff) - 0.5) * 2;
+  return { lat: coords[0] + latOffset, lon: coords[1] + lonOffset };
 }
 
 // ========================================================================
@@ -370,7 +372,7 @@ export async function hydrateThreatCoordinates(threats: RawThreat[]): Promise<Ra
       return { ...threat, lat: lookup.lat, lon: lookup.lon, country: threat.country || lookup.country };
     }
 
-    const centroid = getCountryCentroid(threat.country);
+    const centroid = getCountryCentroid(threat.country, threat.indicator);
     if (centroid) {
       return { ...threat, lat: centroid.lat, lon: centroid.lon };
     }
@@ -386,6 +388,10 @@ export async function hydrateThreatCoordinates(threats: RawThreat[]): Promise<Ra
 export interface SourceResult {
   ok: boolean;
   threats: RawThreat[];
+}
+
+function sourceFailure(): SourceResult {
+  return { ok: false, threats: [] };
 }
 
 // ========================================================================
@@ -441,7 +447,7 @@ export async function fetchFeodoSource(limit: number, cutoffMs: number): Promise
       headers: { Accept: 'application/json', 'User-Agent': CHROME_UA },
       signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
     });
-    if (!response.ok) return { ok: false, threats: [] };
+    if (!response.ok) return sourceFailure();
 
     const payload = await response.json();
     const records: any[] = Array.isArray(payload) ? payload : (Array.isArray(payload?.data) ? payload.data : []);
@@ -454,7 +460,7 @@ export async function fetchFeodoSource(limit: number, cutoffMs: number): Promise
 
     return { ok: true, threats: parsed };
   } catch {
-    return { ok: false, threats: [] };
+    return sourceFailure();
   }
 }
 
@@ -523,7 +529,7 @@ function parseUrlhausRecord(record: any, cutoffMs: number): RawThreat | null {
 
 export async function fetchUrlhausSource(limit: number, cutoffMs: number): Promise<SourceResult> {
   const authKey = cleanString(process.env.URLHAUS_AUTH_KEY || '', 200);
-  if (!authKey) return { ok: false, threats: [] };
+  if (!authKey) return sourceFailure();
 
   try {
     const response = await fetch(URLHAUS_RECENT_URL(limit), {
@@ -531,7 +537,7 @@ export async function fetchUrlhausSource(limit: number, cutoffMs: number): Promi
       headers: { Accept: 'application/json', 'Auth-Key': authKey, 'User-Agent': CHROME_UA },
       signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
     });
-    if (!response.ok) return { ok: false, threats: [] };
+    if (!response.ok) return sourceFailure();
 
     const payload = await response.json();
     const rows: any[] = Array.isArray(payload?.urls) ? payload.urls : (Array.isArray(payload?.data) ? payload.data : []);
@@ -544,7 +550,7 @@ export async function fetchUrlhausSource(limit: number, cutoffMs: number): Promi
 
     return { ok: true, threats: parsed };
   } catch {
-    return { ok: false, threats: [] };
+    return sourceFailure();
   }
 }
 
@@ -598,7 +604,7 @@ export async function fetchC2IntelSource(limit: number): Promise<SourceResult> {
       headers: { Accept: 'text/plain', 'User-Agent': CHROME_UA },
       signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
     });
-    if (!response.ok) return { ok: false, threats: [] };
+    if (!response.ok) return sourceFailure();
 
     const text = await response.text();
     const parsed = text.split('\n')
@@ -608,7 +614,7 @@ export async function fetchC2IntelSource(limit: number): Promise<SourceResult> {
 
     return { ok: true, threats: parsed };
   } catch {
-    return { ok: false, threats: [] };
+    return sourceFailure();
   }
 }
 
@@ -618,7 +624,7 @@ export async function fetchC2IntelSource(limit: number): Promise<SourceResult> {
 
 export async function fetchOtxSource(limit: number, days: number): Promise<SourceResult> {
   const apiKey = cleanString(process.env.OTX_API_KEY || '', 200);
-  if (!apiKey) return { ok: false, threats: [] };
+  if (!apiKey) return sourceFailure();
 
   try {
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -629,7 +635,7 @@ export async function fetchOtxSource(limit: number, days: number): Promise<Sourc
         signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
       },
     );
-    if (!response.ok) return { ok: false, threats: [] };
+    if (!response.ok) return sourceFailure();
 
     const payload = await response.json();
     const results: any[] = Array.isArray(payload?.results) ? payload.results : (Array.isArray(payload) ? payload : []);
@@ -664,7 +670,7 @@ export async function fetchOtxSource(limit: number, days: number): Promise<Sourc
 
     return { ok: true, threats: parsed };
   } catch {
-    return { ok: false, threats: [] };
+    return sourceFailure();
   }
 }
 
@@ -674,7 +680,7 @@ export async function fetchOtxSource(limit: number, days: number): Promise<Sourc
 
 export async function fetchAbuseIpDbSource(limit: number): Promise<SourceResult> {
   const apiKey = cleanString(process.env.ABUSEIPDB_API_KEY || '', 200);
-  if (!apiKey) return { ok: false, threats: [] };
+  if (!apiKey) return sourceFailure();
 
   try {
     const url = `${ABUSEIPDB_BLACKLIST_URL}?confidenceMinimum=90&limit=${Math.min(limit, 500)}`;
@@ -682,7 +688,7 @@ export async function fetchAbuseIpDbSource(limit: number): Promise<SourceResult>
       headers: { Accept: 'application/json', Key: apiKey, 'User-Agent': CHROME_UA },
       signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
     });
-    if (!response.ok) return { ok: false, threats: [] };
+    if (!response.ok) return sourceFailure();
 
     const payload = await response.json();
     const records: any[] = Array.isArray(payload?.data) ? payload.data : [];
@@ -716,7 +722,7 @@ export async function fetchAbuseIpDbSource(limit: number): Promise<SourceResult>
 
     return { ok: true, threats: parsed };
   } catch {
-    return { ok: false, threats: [] };
+    return sourceFailure();
   }
 }
 
@@ -769,4 +775,3 @@ export function toProtoCyberThreat(raw: RawThreat): CyberThreat {
     lastSeenAt: raw.lastSeen,
   };
 }
-

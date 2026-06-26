@@ -1,3 +1,4 @@
+import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
 /**
  * VirtualList - Efficient virtual scrolling with DOM recycling.
  * Only renders visible items + a small buffer, dramatically reducing DOM nodes.
@@ -39,6 +40,7 @@ export class VirtualList {
   private visibleEnd = 0;
   private scrollRAF: number | null = null;
   private isDestroyed = false;
+  private resizeObserver: ResizeObserver | null = null;
 
   constructor(options: VirtualListOptions) {
     this.container = options.container;
@@ -70,12 +72,12 @@ export class VirtualList {
 
     // Handle resize
     if (typeof ResizeObserver !== 'undefined') {
-      const resizeObserver = new ResizeObserver(() => {
+      this.resizeObserver = new ResizeObserver(() => {
         if (!this.isDestroyed) {
           this.updateVisibleRange();
         }
       });
-      resizeObserver.observe(this.viewport);
+      this.resizeObserver.observe(this.viewport);
     }
   }
 
@@ -123,8 +125,12 @@ export class VirtualList {
       cancelAnimationFrame(this.scrollRAF);
     }
     this.viewport.removeEventListener('scroll', this.handleScroll);
+    if (this.resizeObserver) {
+      this.resizeObserver.disconnect();
+      this.resizeObserver = null;
+    }
     this.itemPool = [];
-    this.container.innerHTML = '';
+    setTrustedHtml(this.container, trustedHtml('', "legacy direct innerHTML migration"));
   }
 
   private handleScroll = (): void => {
@@ -292,7 +298,7 @@ export class WindowedList<T> {
     this.chunkElements.clear();
 
     // Create container structure
-    this.container.innerHTML = '';
+    setTrustedHtml(this.container, trustedHtml('', "legacy direct innerHTML migration"));
 
     if (items.length === 0) {
       return;
@@ -385,9 +391,30 @@ export class WindowedList<T> {
       .map((item, i) => this.renderItem(item, startIdx + i))
       .join('');
 
-    element.innerHTML = html;
+    setTrustedHtml(element, trustedHtml(html, "legacy direct innerHTML migration"));
     element.classList.add('rendered');
     this.renderedChunks.add(chunkIndex);
+  }
+
+  /**
+   * Scroll to the first item matching the predicate, rendering its chunk if needed.
+   * Returns true if found.
+   */
+  scrollToItem(predicate: (item: T) => boolean): boolean {
+    const index = this.items.findIndex(predicate);
+    if (index === -1) return false;
+
+    const chunkIndex = Math.floor(index / this.chunkSize);
+    const chunkEl = this.chunkElements.get(chunkIndex);
+    if (!chunkEl) return false;
+
+    if (!this.renderedChunks.has(chunkIndex)) {
+      this.renderChunk(chunkIndex);
+      this.onRendered?.();
+    }
+
+    chunkEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return true;
   }
 
   /**

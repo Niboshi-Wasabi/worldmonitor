@@ -18,38 +18,12 @@ import {
 import { invokeTauri } from '@/services/tauri-bridge';
 import { escapeHtml } from '@/utils/sanitize';
 import { isDesktopRuntime } from '@/services/runtime';
+import { fetchOllamaModels as fetchOllamaModelsFromService } from '@/services/ollama-models';
 import { t } from '@/services/i18n';
 import { trackFeatureToggle } from '@/services/analytics';
+import { SIGNUP_URLS, PLAINTEXT_KEYS, MASKED_SENTINEL } from '@/services/settings-constants';
+import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
 
-const SIGNUP_URLS: Partial<Record<RuntimeSecretKey, string>> = {
-  GROQ_API_KEY: 'https://console.groq.com/keys',
-  OPENROUTER_API_KEY: 'https://openrouter.ai/settings/keys',
-  FRED_API_KEY: 'https://fred.stlouisfed.org/docs/api/api_key.html',
-  EIA_API_KEY: 'https://www.eia.gov/opendata/register.php',
-  CLOUDFLARE_API_TOKEN: 'https://dash.cloudflare.com/profile/api-tokens',
-  ACLED_ACCESS_TOKEN: 'https://developer.acleddata.com/',
-  URLHAUS_AUTH_KEY: 'https://auth.abuse.ch/',
-  OTX_API_KEY: 'https://otx.alienvault.com/',
-  ABUSEIPDB_API_KEY: 'https://www.abuseipdb.com/login',
-  WINGBITS_API_KEY: 'https://wingbits.com/register',
-  AISSTREAM_API_KEY: 'https://aisstream.io/authenticate',
-  OPENSKY_CLIENT_ID: 'https://opensky-network.org/login?view=registration',
-  OPENSKY_CLIENT_SECRET: 'https://opensky-network.org/login?view=registration',
-  FINNHUB_API_KEY: 'https://finnhub.io/register',
-  NASA_FIRMS_API_KEY: 'https://firms.modaps.eosdis.nasa.gov/api/area/',
-  UC_DP_KEY: 'https://ucdp.uu.se/downloads/',
-  OLLAMA_API_URL: 'https://ollama.com/download',
-  OLLAMA_MODEL: 'https://ollama.com/library',
-};
-
-const PLAINTEXT_KEYS = new Set<RuntimeSecretKey>([
-  'OLLAMA_API_URL',
-  'OLLAMA_MODEL',
-  'WS_RELAY_URL',
-  'VITE_OPENSKY_RELAY_URL',
-]);
-
-const MASKED_SENTINEL = '__WM_MASKED__';
 
 interface RuntimeConfigPanelOptions {
   mode?: 'full' | 'alert';
@@ -62,6 +36,7 @@ export class RuntimeConfigPanel extends Panel {
   private readonly mode: 'full' | 'alert';
   private readonly buffered: boolean;
   private readonly featureFilter?: RuntimeFeatureId[];
+  private hiddenByUser = false;
   private pendingSecrets = new Map<RuntimeSecretKey, string>();
   private validatedKeys = new Map<RuntimeSecretKey, boolean>();
   private validationMessages = new Map<RuntimeSecretKey, string>();
@@ -185,6 +160,25 @@ export class RuntimeConfigPanel extends Panel {
     this.unsubscribe = null;
   }
 
+  private setEffectiveVisibility(visible: boolean): void {
+    if (visible) super.show();
+    else super.hide();
+  }
+
+  public override show(): void {
+    this.hiddenByUser = false;
+    if (this.mode === 'alert') {
+      this.render();
+    } else {
+      this.setEffectiveVisibility(true);
+    }
+  }
+
+  public override hide(): void {
+    this.hiddenByUser = true;
+    this.setEffectiveVisibility(false);
+  }
+
   private captureUnsavedInputs(): void {
     if (!this.buffered) return;
     this.content.querySelectorAll<HTMLInputElement>('input[data-secret]').forEach((input) => {
@@ -222,46 +216,52 @@ export class RuntimeConfigPanel extends Panel {
     const features = this.getFilteredFeatures();
 
     if (desktop && this.mode === 'alert') {
+      if (this.hiddenByUser) {
+        this.setEffectiveVisibility(false);
+        return;
+      }
+
       const totalFeatures = RUNTIME_FEATURES.length;
       const availableFeatures = RUNTIME_FEATURES.filter((feature) => isFeatureAvailable(feature.id)).length;
       const missingFeatures = Math.max(0, totalFeatures - availableFeatures);
       const configuredCount = Object.keys(snapshot.secrets).length;
+      const alertState = configuredCount > 0
+        ? (missingFeatures > 0 ? 'some' : 'configured')
+        : 'needsKeys';
 
       if (missingFeatures === 0 && configuredCount >= totalFeatures) {
-        this.hide();
+        this.setEffectiveVisibility(false);
         return;
       }
 
-      const alertTitle = configuredCount > 0
-        ? (missingFeatures > 0 ? t('modals.runtimeConfig.alertTitle.some') : t('modals.runtimeConfig.alertTitle.configured'))
-        : t('modals.runtimeConfig.alertTitle.needsKeys');
+      const alertTitle = t(`modals.runtimeConfig.alertTitle.${alertState}`);
       const alertClass = missingFeatures > 0 ? 'warn' : 'ok';
 
-      this.show();
-      this.content.innerHTML = `
-        <section class="runtime-alert runtime-alert-${alertClass}">
+      this.setEffectiveVisibility(true);
+      setTrustedHtml(this.content, trustedHtml(`
+        <section class="runtime-alert runtime-alert-${alertClass}" data-alert-state="${alertState}">
           <h3>${alertTitle}</h3>
           <p>
             ${availableFeatures}/${totalFeatures} ${t('modals.runtimeConfig.summary.available')}${configuredCount > 0 ? ` · ${configuredCount} ${t('modals.runtimeConfig.summary.secrets')}` : ''}.
           </p>
           <p class="runtime-alert-skip">${t('modals.runtimeConfig.skipSetup')}</p>
-          <button type="button" class="runtime-open-settings-btn" data-open-settings>
-            ${t('modals.runtimeConfig.openSettings')}
+          <button type="button" class="runtime-early-access-btn" data-early-access>
+            ${t('modals.runtimeConfig.reserveEarlyAccess')}
           </button>
         </section>
-      `;
+      `, "legacy direct innerHTML migration"));
       this.attachListeners();
       return;
     }
 
-    this.content.innerHTML = `
+    setTrustedHtml(this.content, trustedHtml(`
       <div class="runtime-config-summary">
         ${desktop ? t('modals.runtimeConfig.summary.desktop') : t('modals.runtimeConfig.summary.web')} · ${features.filter(f => isFeatureAvailable(f.id)).length}/${features.length} ${t('modals.runtimeConfig.summary.available')}
       </div>
       <div class="runtime-config-list">
         ${features.map(feature => this.renderFeature(feature)).join('')}
       </div>
-    `;
+    `, "legacy direct innerHTML migration"));
 
     this.attachListeners();
   }
@@ -308,9 +308,7 @@ export class RuntimeConfigPanel extends Panel {
     const helpKey = `modals.runtimeConfig.help.${key}`;
     const helpRaw = t(helpKey);
     const helpText = helpRaw !== helpKey ? helpRaw : '';
-    const linkHtml = signupUrl
-      ? ` <a href="#" data-signup-url="${signupUrl}" class="runtime-secret-link" title="Get API key">&#x2197;</a>`
-      : '';
+    const showGetKey = signupUrl && !state.present && !pending;
     const validated = this.validatedKeys.get(key);
     const inputClass = pending ? (validated === false ? 'invalid' : 'valid-staged') : '';
     const checkClass = validated === true ? 'visible' : '';
@@ -337,13 +335,20 @@ export class RuntimeConfigPanel extends Panel {
       `;
     }
 
+    const getKeyHtml = showGetKey
+      ? `<a href="#" data-signup-url="${signupUrl}" class="runtime-secret-link">Get key</a>`
+      : '';
+
     return `
       <div class="runtime-secret-row">
-        <div class="runtime-secret-key"><code>${escapeHtml(key)}</code>${linkHtml}</div>
+        <div class="runtime-secret-key"><code>${escapeHtml(key)}</code></div>
         <span class="runtime-secret-status ${statusClass}">${escapeHtml(status)}</span>
         <span class="runtime-secret-check ${checkClass}">&#x2713;</span>
         ${helpText ? `<div class="runtime-secret-meta">${escapeHtml(helpText)}</div>` : ''}
-        <input type="${PLAINTEXT_KEYS.has(key) ? 'text' : 'password'}" data-secret="${key}" placeholder="${pending ? t('modals.runtimeConfig.placeholder.staged') : t('modals.runtimeConfig.placeholder.setSecret')}" autocomplete="off" ${isDesktopRuntime() ? '' : 'disabled'} class="${inputClass}" ${pending ? `value="${PLAINTEXT_KEYS.has(key) ? escapeHtml(this.pendingSecrets.get(key) || '') : MASKED_SENTINEL}"` : (PLAINTEXT_KEYS.has(key) && state.present ? `value="${escapeHtml(getRuntimeConfigSnapshot().secrets[key]?.value || '')}"` : '')}>
+        <div class="runtime-input-wrapper${showGetKey ? ' has-suffix' : ''}">
+          <input type="${PLAINTEXT_KEYS.has(key) ? 'text' : 'password'}" data-secret="${key}" placeholder="${pending ? t('modals.runtimeConfig.placeholder.staged') : t('modals.runtimeConfig.placeholder.setSecret')}" autocomplete="off" ${isDesktopRuntime() ? '' : 'disabled'} class="${inputClass}" ${pending ? `value="${PLAINTEXT_KEYS.has(key) ? escapeHtml(this.pendingSecrets.get(key) || '') : MASKED_SENTINEL}"` : (PLAINTEXT_KEYS.has(key) && state.present ? `value="${escapeHtml(getRuntimeConfigSnapshot().secrets[key]?.value || '')}"` : '')}>
+          ${getKeyHtml}
+        </div>
         ${hintText ? `<span class="runtime-secret-hint">${escapeHtml(hintText)}</span>` : ''}
       </div>
     `;
@@ -366,10 +371,13 @@ export class RuntimeConfigPanel extends Panel {
     if (!isDesktopRuntime()) return;
 
     if (this.mode === 'alert') {
-      this.content.querySelector<HTMLButtonElement>('[data-open-settings]')?.addEventListener('click', () => {
-        void invokeTauri<void>('open_settings_window_command').catch((error) => {
-          console.warn('[runtime-config] Failed to open settings window', error);
-        });
+      this.content.querySelector<HTMLButtonElement>('[data-early-access]')?.addEventListener('click', () => {
+        const url = 'https://www.worldmonitor.app/pro';
+        if (isDesktopRuntime()) {
+          void invokeTauri<void>('open_url', { url }).catch(() => window.open(url, '_blank'));
+        } else {
+          window.open(url, '_blank');
+        }
       });
       return;
     }
@@ -511,13 +519,6 @@ export class RuntimeConfigPanel extends Panel {
     }
   }
 
-  private static makeTimeout(ms: number): AbortSignal {
-    if (typeof AbortSignal.timeout === 'function') return AbortSignal.timeout(ms);
-    const ctrl = new AbortController();
-    setTimeout(() => ctrl.abort(), ms);
-    return ctrl.signal;
-  }
-
   private showManualModelInput(select: HTMLSelectElement): void {
     const manual = select.parentElement?.querySelector<HTMLInputElement>('input[data-model-manual]');
     if (!manual) return;
@@ -538,41 +539,21 @@ export class RuntimeConfigPanel extends Panel {
   private async fetchOllamaModels(select: HTMLSelectElement): Promise<void> {
     const snapshot = getRuntimeConfigSnapshot();
     const ollamaUrl = this.pendingSecrets.get('OLLAMA_API_URL')
-      || snapshot.secrets['OLLAMA_API_URL']?.value
+      || snapshot.secrets.OLLAMA_API_URL?.value
       || '';
     if (!ollamaUrl) {
-      select.innerHTML = '<option value="" disabled selected>Set Ollama URL first</option>';
+      setTrustedHtml(select, trustedHtml('<option value="" disabled selected>Set Ollama URL first</option>', "legacy direct innerHTML migration"));
       return;
     }
 
     const currentModel = this.pendingSecrets.get('OLLAMA_MODEL')
-      || snapshot.secrets['OLLAMA_MODEL']?.value
+      || snapshot.secrets.OLLAMA_MODEL?.value
       || '';
 
     try {
-      // Try Ollama-native /api/tags first, fall back to OpenAI-compatible /v1/models
-      let models: string[] = [];
-      try {
-        const res = await fetch(new URL('/api/tags', ollamaUrl).toString(), {
-          signal: RuntimeConfigPanel.makeTimeout(5000),
-        });
-        if (res.ok) {
-          const data = await res.json() as { models?: Array<{ name: string }> };
-          models = (data.models?.map(m => m.name) || []).filter(n => !n.includes('embed'));
-        }
-      } catch { /* Ollama endpoint not available, try OpenAI format */ }
+      const models = await fetchOllamaModelsFromService(ollamaUrl);
 
-      if (models.length === 0) {
-        try {
-          const res = await fetch(new URL('/v1/models', ollamaUrl).toString(), {
-            signal: RuntimeConfigPanel.makeTimeout(5000),
-          });
-          if (res.ok) {
-            const data = await res.json() as { data?: Array<{ id: string }> };
-            models = (data.data?.map(m => m.id) || []).filter(n => !n.includes('embed'));
-          }
-        } catch { /* OpenAI endpoint also unavailable */ }
-      }
+      if (!select.isConnected) return;
 
       if (models.length === 0) {
         // No models discovered — show manual text input as fallback
@@ -580,9 +561,9 @@ export class RuntimeConfigPanel extends Panel {
         return;
       }
 
-      select.innerHTML = models.map(name =>
+      setTrustedHtml(select, trustedHtml(models.map(name =>
         `<option value="${escapeHtml(name)}" ${name === currentModel ? 'selected' : ''}>${escapeHtml(name)}</option>`
-      ).join('');
+      ).join(''), "legacy direct innerHTML migration"));
 
       // Auto-select first model if none stored
       if (!currentModel && models.length > 0) {

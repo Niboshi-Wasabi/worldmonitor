@@ -78,10 +78,12 @@ enum FlightDelayType {
   FLIGHT_DELAY_TYPE_ARRIVAL_DELAY = 4;
   // General delay.
   FLIGHT_DELAY_TYPE_GENERAL = 5;
+  // Airport/airspace closure.
+  FLIGHT_DELAY_TYPE_CLOSURE = 6;
 }
 
 // FlightDelaySeverity represents the severity of flight delays at an airport.
-// Maps to TS union: 'normal' | 'minor' | 'moderate' | 'major' | 'severe'.
+// Maps to TS union: 'normal' | 'minor' | 'moderate' | 'major' | 'severe' | 'unknown'.
 enum FlightDelaySeverity {
   // Unspecified severity.
   FLIGHT_DELAY_SEVERITY_UNSPECIFIED = 0;
@@ -95,6 +97,10 @@ enum FlightDelaySeverity {
   FLIGHT_DELAY_SEVERITY_MAJOR = 4;
   // Severe delays over 90 minutes.
   FLIGHT_DELAY_SEVERITY_SEVERE = 5;
+  // No telemetry available; do not interpret as normal operations. Emitted
+  // when an upstream source (FAA seed, AviationStack intl cache) failed to
+  // return data for this airport — coverage is unknown, not "healthy".
+  FLIGHT_DELAY_SEVERITY_UNKNOWN = 6;
 }
 
 // FlightDelaySource represents the source of delay data.
@@ -105,6 +111,10 @@ enum FlightDelaySource {
   FLIGHT_DELAY_SOURCE_FAA = 1;
   // Eurocontrol (European air traffic management).
   FLIGHT_DELAY_SOURCE_EUROCONTROL = 2;
-  // Computed from multiple sources.
+  // Computed from multiple sources (legacy, prefer specific sources below).
   FLIGHT_DELAY_SOURCE_COMPUTED = 3;
+  // AviationStack real-time flight data.
+  FLIGHT_DELAY_SOURCE_AVIATIONSTACK = 4;
+  // ICAO NOTAM (Notice to Air Missions).
+  FLIGHT_DELAY_SOURCE_NOTAM = 5;
 }

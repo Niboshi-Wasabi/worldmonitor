@@ -5,6 +5,8 @@ import { escapeHtml } from '@/utils/sanitize';
 import { getCSSColor } from '@/utils';
 import { getSignalContext, type SignalType } from '@/utils/analysis-constants';
 import { t } from '@/services/i18n';
+import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+
 
 export class SignalModal {
   private element: HTMLElement;
@@ -12,15 +14,18 @@ export class SignalModal {
   private audioEnabled = true;
   private audio: HTMLAudioElement | null = null;
   private onLocationClick?: (lat: number, lon: number) => void;
+  private escHandler = (e: KeyboardEvent) => { if (e.key === 'Escape') this.hide(); };
 
   constructor() {
     this.element = document.createElement('div');
     this.element.className = 'signal-modal-overlay';
-    this.element.innerHTML = `
+    this.element.setAttribute('role', 'dialog');
+    this.element.setAttribute('aria-modal', 'true');
+    setTrustedHtml(this.element, trustedHtml(`
       <div class="signal-modal">
         <div class="signal-modal-header">
           <span class="signal-modal-title">🎯 ${t('modals.signal.title')}</span>
-          <button class="signal-modal-close">×</button>
+          <button class="signal-modal-close" aria-label="Close">×</button>
         </div>
         <div class="signal-modal-content"></div>
         <div class="signal-modal-footer">
@@ -31,7 +36,7 @@ export class SignalModal {
           <button class="signal-dismiss-btn">${t('modals.signal.dismiss')}</button>
         </div>
       </div>
-    `;
+    `, "legacy direct innerHTML migration"));
 
     document.body.appendChild(this.element);
     this.setupEventListeners();
@@ -75,7 +80,7 @@ export class SignalModal {
       if (target.classList.contains('location-link')) {
         const lat = parseFloat(target.dataset.lat || '0');
         const lon = parseFloat(target.dataset.lon || '0');
-        if (this.onLocationClick && !isNaN(lat) && !isNaN(lon)) {
+        if (this.onLocationClick && !Number.isNaN(lat) && !Number.isNaN(lon)) {
           this.onLocationClick(lat, lon);
           this.hide();
         }
@@ -99,6 +104,10 @@ export class SignalModal {
     this.onLocationClick = handler;
   }
 
+  private activateEsc(): void {
+    document.addEventListener('keydown', this.escHandler);
+  }
+
   public show(signals: CorrelationSignal[]): void {
     if (signals.length === 0) return;
     if (document.fullscreenElement) return;
@@ -106,6 +115,7 @@ export class SignalModal {
     this.currentSignals = [...signals, ...this.currentSignals].slice(0, 50);
     this.renderSignals();
     this.element.classList.add('active');
+    this.activateEsc();
     this.playSound();
   }
 
@@ -113,6 +123,7 @@ export class SignalModal {
     this.currentSignals = [signal];
     this.renderSignals();
     this.element.classList.add('active');
+    this.activateEsc();
   }
 
   public showAlert(alert: UnifiedAlert): void {
@@ -128,6 +139,8 @@ export class SignalModal {
       cii_spike: '📊',
       convergence: '🌍',
       cascade: '⚡',
+      sanctions: '🚫',
+      radiation: '☢️',
       composite: '🔗',
     };
 
@@ -185,7 +198,7 @@ export class SignalModal {
       detailsHtml += `
         <div class="signal-context-item">
           <span class="context-label">${t('modals.signal.source')}</span>
-          <span class="context-value">${escapeHtml(cascade.sourceName)} (${cascade.sourceType})</span>
+          <span class="context-value">${escapeHtml(cascade.sourceName)} (${escapeHtml(cascade.sourceType)})</span>
         </div>
         <div class="signal-context-item">
           <span class="context-label">${t('modals.signal.countriesAffected')}</span>
@@ -198,7 +211,68 @@ export class SignalModal {
       `;
     }
 
-    content.innerHTML = `
+
+    if (alert.components.sanctions) {
+      const sanctions = alert.components.sanctions;
+      detailsHtml += `
+        <div class="signal-context-item">
+          <span class="context-label">Country</span>
+          <span class="context-value">${escapeHtml(sanctions.countryName)} (${escapeHtml(sanctions.countryCode)})</span>
+        </div>
+        <div class="signal-context-item">
+          <span class="context-label">Pressure</span>
+          <span class="context-value">${sanctions.entryCount} designations${sanctions.newEntryCount > 0 ? ` · +${sanctions.newEntryCount} new` : ''}</span>
+        </div>
+        <div class="signal-context-item">
+          <span class="context-label">Top program</span>
+          <span class="context-value">${escapeHtml(sanctions.topProgram)} (${sanctions.topProgramCount})</span>
+        </div>
+        <div class="signal-context-item">
+          <span class="context-label">Vessels / aircraft</span>
+          <span class="context-value">${sanctions.vesselCount} / ${sanctions.aircraftCount}</span>
+        </div>
+        <div class="signal-context-item">
+          <span class="context-label">Dataset size</span>
+          <span class="context-value">${sanctions.totalCount}${sanctions.datasetDate ? ` · ${new Date(sanctions.datasetDate).toISOString().slice(0, 10)}` : ''}</span>
+        </div>
+      `;
+    }
+
+    if (alert.components.radiation) {
+      const radiation = alert.components.radiation;
+      detailsHtml += `
+        <div class="signal-context-item">
+          <span class="context-label">Station</span>
+          <span class="context-value">${escapeHtml(radiation.siteName)}</span>
+        </div>
+        <div class="signal-context-item">
+          <span class="context-label">Reading</span>
+          <span class="context-value">${radiation.value.toFixed(1)} ${escapeHtml(radiation.unit)}</span>
+        </div>
+        <div class="signal-context-item">
+          <span class="context-label">Baseline</span>
+          <span class="context-value">${radiation.baselineValue.toFixed(1)} ${escapeHtml(radiation.unit)}</span>
+        </div>
+        <div class="signal-context-item">
+          <span class="context-label">Delta / z-score</span>
+          <span class="context-value">+${radiation.delta.toFixed(1)} / ${radiation.zScore.toFixed(2)}</span>
+        </div>
+        <div class="signal-context-item">
+          <span class="context-label">Confidence</span>
+          <span class="context-value">${escapeHtml(radiation.confidence)}${radiation.corroborated ? ' · confirmed' : ''}${radiation.conflictingSources ? ' · conflicting' : ''}</span>
+        </div>
+        <div class="signal-context-item">
+          <span class="context-label">Sources</span>
+          <span class="context-value">${escapeHtml(radiation.contributingSources.join(' + '))} (${radiation.sourceCount})</span>
+        </div>
+        <div class="signal-context-item">
+          <span class="context-label">Anomalies in batch</span>
+          <span class="context-value">${radiation.anomalyCount} total (${radiation.spikeCount} spike, ${radiation.elevatedCount} elevated, ${radiation.corroboratedCount} confirmed)</span>
+        </div>
+      `;
+    }
+
+    setTrustedHtml(content, trustedHtml(`
       <div class="signal-item" style="border-left-color: ${color}">
         <div class="signal-type">${icon} ${alert.type.toUpperCase().replace('_', ' ')}</div>
         <div class="signal-title">${escapeHtml(alert.title)}</div>
@@ -216,20 +290,22 @@ export class SignalModal {
           </div>
         ` : ''}
       </div>
-    `;
+    `, "legacy direct innerHTML migration"));
 
     this.element.classList.add('active');
+    this.activateEsc();
   }
 
   public playSound(): void {
     if (this.audioEnabled && this.audio) {
       this.audio.currentTime = 0;
-      this.audio.play().catch(() => {});
+      this.audio.play()?.catch(() => {});
     }
   }
 
   public hide(): void {
     this.element.classList.remove('active');
+    document.removeEventListener('keydown', this.escHandler);
   }
 
   private renderSignals(): void {
@@ -286,7 +362,7 @@ export class SignalModal {
           ${locationData.lat && locationData.lon ? `
             <div class="signal-location">
               <button class="location-link" data-lat="${locationData.lat}" data-lon="${locationData.lon}">
-                📍 ${t('modals.signal.viewOnMap')}: ${locationData.regionName || `${locationData.lat.toFixed(2)}°, ${locationData.lon.toFixed(2)}°`}
+                📍 ${t('modals.signal.viewOnMap')}: ${locationData.regionName ? escapeHtml(locationData.regionName) : `${locationData.lat.toFixed(2)}°, ${locationData.lon.toFixed(2)}°`}
               </button>
             </div>
           ` : ''}
@@ -318,7 +394,7 @@ export class SignalModal {
       `;
     }).join('');
 
-    content.innerHTML = html;
+    setTrustedHtml(content, trustedHtml(html, "legacy direct innerHTML migration"));
   }
 
   private formatTime(date: Date): string {

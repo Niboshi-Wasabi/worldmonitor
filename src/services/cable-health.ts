@@ -1,3 +1,4 @@
+import { getRpcBaseUrl } from '@/services/rpc-client';
 import {
   InfrastructureServiceClient,
   type GetCableHealthResponse,
@@ -6,8 +7,8 @@ import {
 import type { CableHealthRecord, CableHealthResponse, CableHealthStatus } from '@/types';
 import { createCircuitBreaker } from '@/utils';
 
-const client = new InfrastructureServiceClient('', { fetch: (...args) => globalThis.fetch(...args) });
-const breaker = createCircuitBreaker<GetCableHealthResponse>({ name: 'Cable Health' });
+const client = new InfrastructureServiceClient(getRpcBaseUrl(), { fetch: (...args) => globalThis.fetch(...args) });
+const breaker = createCircuitBreaker<GetCableHealthResponse>({ name: 'Cable Health', cacheTtlMs: 10 * 60 * 1000, persistCache: true });
 const emptyFallback: GetCableHealthResponse = { generatedAt: 0, cables: {} };
 
 // ---- Proto enum -> frontend string adapter ----
@@ -47,7 +48,7 @@ export async function fetchCableHealth(): Promise<CableHealthResponse> {
 
   const resp = await breaker.execute(async () => {
     return client.getCableHealth({});
-  }, emptyFallback);
+  }, emptyFallback, { shouldCache: (r) => Object.keys(r.cables).length > 0 });
 
   const cables: Record<string, CableHealthRecord> = {};
   for (const [id, proto] of Object.entries(resp.cables)) {

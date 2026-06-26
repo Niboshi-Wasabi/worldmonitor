@@ -1,8 +1,6 @@
 /**
- * ListEarthquakes RPC -- proxies the USGS earthquake GeoJSON API.
- *
- * Fetches M4.5+ earthquakes from the last 24 hours and transforms the USGS
- * GeoJSON features into proto-shaped Earthquake objects.
+ * ListEarthquakes RPC -- reads seeded earthquake data from Railway seed cache.
+ * All external USGS API calls happen in seed-earthquakes.mjs on Railway.
  */
 
 import type {
@@ -12,56 +10,22 @@ import type {
   ListEarthquakesResponse,
 } from '../../../../src/generated/server/worldmonitor/seismology/v1/service_server';
 
-import { getCachedJson, setCachedJson } from '../../../_shared/redis';
-import { CHROME_UA } from '../../../_shared/constants';
+import { getCachedJson } from '../../../_shared/redis';
 
-const USGS_FEED_URL =
-  'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_day.geojson';
-const CACHE_KEY = 'seismology:earthquakes:v1';
-const CACHE_TTL = 300; // 5 minutes
+const SEED_CACHE_KEY = 'seismology:earthquakes:v1';
+
+type EarthquakeCache = { earthquakes: ListEarthquakesResponse['earthquakes'] };
 
 export const listEarthquakes: SeismologyServiceHandler['listEarthquakes'] = async (
   _ctx: ServerContext,
   req: ListEarthquakesRequest,
 ): Promise<ListEarthquakesResponse> => {
-  const pageSize = req.pagination?.pageSize || 500;
-
-  // Check Redis cache first (H-4 fix) — cache stores full set, slice on read (C-4 fix)
-  const cached = (await getCachedJson(CACHE_KEY)) as { earthquakes: ListEarthquakesResponse['earthquakes'] } | null;
-  if (cached?.earthquakes) {
-    return { earthquakes: cached.earthquakes.slice(0, pageSize), pagination: undefined };
+  const pageSize = req.pageSize || 500;
+  try {
+    const seedData = await getCachedJson(SEED_CACHE_KEY, true) as EarthquakeCache | null;
+    const earthquakes = seedData?.earthquakes || [];
+    return { earthquakes: earthquakes.slice(0, pageSize), pagination: undefined };
+  } catch {
+    return { earthquakes: [], pagination: undefined };
   }
-
-  const response = await fetch(USGS_FEED_URL, {
-    headers: { Accept: 'application/json', 'User-Agent': CHROME_UA },
-    signal: AbortSignal.timeout(10_000),
-  });
-
-  if (!response.ok) {
-    throw new Error(`USGS API error: ${response.status}`);
-  }
-
-  const geojson: any = await response.json();
-  const features: any[] = geojson.features || [];
-
-  // Null-safe property access (H-5 fix)
-  const earthquakes = features
-    .filter((f: any) => f?.properties && f?.geometry?.coordinates)
-    .map((f: any) => ({
-      id: (f.id as string) || '',
-      place: (f.properties?.place as string) || '',
-      magnitude: (f.properties?.mag as number) ?? 0,
-      depthKm: (f.geometry?.coordinates?.[2] as number) ?? 0,
-      location: {
-        latitude: (f.geometry?.coordinates?.[1] as number) ?? 0,
-        longitude: (f.geometry?.coordinates?.[0] as number) ?? 0,
-      },
-      occurredAt: f.properties?.time ?? 0,
-      sourceUrl: (f.properties?.url as string) || '',
-    }));
-
-  // Cache the full set, slice on read (C-4 fix: avoids polluting cache with partial results)
-  await setCachedJson(CACHE_KEY, { earthquakes }, CACHE_TTL);
-
-  return { earthquakes: earthquakes.slice(0, pageSize), pagination: undefined };
 };

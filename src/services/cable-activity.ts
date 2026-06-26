@@ -1,8 +1,32 @@
 import type { CableAdvisory, RepairShip, UnderseaCable } from '@/types';
-import { UNDERSEA_CABLES } from '@/config';
+import { getRpcBaseUrl } from '@/services/rpc-client';
 import { MaritimeServiceClient, type NavigationalWarning } from '@/generated/client/worldmonitor/maritime/v1/service_client';
 
-const maritimeClient = new MaritimeServiceClient('', { fetch: (...args) => globalThis.fetch(...args) });
+// UNDERSEA_CABLES (~130KB) lives in the lazy geo-map chunk; cable-activity is
+// reached eagerly via data-loader, so it loads the table on demand inside the
+// async fetch path rather than statically importing it onto the eager graph.
+let cablesData: UnderseaCable[] = [];
+let cablesDataPromise: Promise<void> | null = null;
+async function ensureCablesData(): Promise<void> {
+  if (cablesData.length > 0) return;
+  if (!cablesDataPromise) {
+    cablesDataPromise = import('@/config/geo-map')
+      .then(({ UNDERSEA_CABLES }) => {
+        cablesData = UNDERSEA_CABLES;
+      })
+      .catch((error) => {
+        cablesDataPromise = null;
+        throw error;
+      });
+  }
+  try {
+    await cablesDataPromise;
+  } catch {
+    /* keep empty → retried on the next fetch */
+  }
+}
+
+const maritimeClient = new MaritimeServiceClient(getRpcBaseUrl(), { fetch: (...args) => globalThis.fetch(...args) });
 
 interface CableActivity {
   advisories: CableAdvisory[];
@@ -110,10 +134,10 @@ function findNearestCable(lat: number, lon: number): UnderseaCable | null {
   let nearest: UnderseaCable | null = null;
   let minDist = Infinity;
 
-  for (const cable of UNDERSEA_CABLES) {
+  for (const cable of cablesData) {
     for (const point of cable.points) {
       const [cableLon, cableLat] = point;
-      const dist = Math.sqrt(Math.pow(lat - cableLat, 2) + Math.pow(lon - cableLon, 2));
+      const dist = Math.sqrt((lat - cableLat) ** 2 + (lon - cableLon) ** 2);
       if (dist < minDist && dist < 5) { // Within 5 degrees
         minDist = dist;
         nearest = cable;
@@ -127,7 +151,7 @@ function findNearestCable(lat: number, lon: number): UnderseaCable | null {
 function parseIssueDate(dateStr: string): Date {
   // Format: "081653Z MAY 2024" or "101200Z JAN 2025"
   const match = dateStr.match(/(\d{2})(\d{4})Z\s+([A-Z]{3})\s+(\d{4})/i);
-  if (match && match[1] && match[2] && match[3] && match[4]) {
+  if (match?.[1] && match[2] && match[3] && match[4]) {
     const day = parseInt(match[1], 10);
     const time = match[2];
     const monthStr = match[3].toUpperCase();
@@ -282,12 +306,11 @@ function formatNgaDate(epochMs: number): string {
 
 export async function fetchCableActivity(): Promise<CableActivity> {
   try {
-    const response = await maritimeClient.listNavigationalWarnings({ area: '' });
+    await ensureCablesData();
+    const response = await maritimeClient.listNavigationalWarnings({ area: '', pageSize: 0, cursor: '' });
     const warnings: NgaWarning[] = response.warnings.map(protoToNgaWarning);
-    console.log(`[CableActivity] Fetched ${warnings.length} NGA warnings`);
 
     const activity = processWarnings(warnings);
-    console.log(`[CableActivity] Found ${activity.advisories.length} advisories, ${activity.repairShips.length} repair ships`);
 
     return activity;
   } catch (error) {

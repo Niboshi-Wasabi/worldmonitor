@@ -1,3 +1,4 @@
+import { getRpcBaseUrl } from '@/services/rpc-client';
 import {
   WildfireServiceClient,
   type FireDetection,
@@ -5,6 +6,7 @@ import {
   type ListFireDetectionsResponse,
 } from '@/generated/client/worldmonitor/wildfire/v1/service_client';
 import { createCircuitBreaker } from '@/utils';
+import { getHydratedData } from '@/services/bootstrap';
 
 export type { FireDetection };
 
@@ -16,6 +18,7 @@ export interface FireRegionStats {
   fireCount: number;
   totalFrp: number;
   highIntensityCount: number;
+  possibleExplosionCount: number;
 }
 
 export interface FetchResult {
@@ -38,21 +41,22 @@ export interface MapFire {
 
 // -- Client --
 
-const client = new WildfireServiceClient('', { fetch: (...args) => globalThis.fetch(...args) });
-const breaker = createCircuitBreaker<ListFireDetectionsResponse>({ name: 'Wildfires' });
+const client = new WildfireServiceClient(getRpcBaseUrl(), { fetch: (...args) => globalThis.fetch(...args) });
+const breaker = createCircuitBreaker<ListFireDetectionsResponse>({ name: 'Wildfires', cacheTtlMs: 30 * 60 * 1000, persistCache: true });
 
 const emptyFallback: ListFireDetectionsResponse = { fireDetections: [] };
 
 // -- Public API --
 
 export async function fetchAllFires(_days?: number): Promise<FetchResult> {
-  const response = await breaker.execute(async () => {
-    return client.listFireDetections({});
+  const hydrated = getHydratedData('wildfires') as ListFireDetectionsResponse | undefined;
+  const response = (hydrated?.fireDetections?.length ? hydrated : null) ?? await breaker.execute(async () => {
+    return client.listFireDetections({ start: 0, end: 0, pageSize: 0, cursor: '', neLat: 0, neLon: 0, swLat: 0, swLon: 0 });
   }, emptyFallback);
   const detections = response.fireDetections;
 
   if (detections.length === 0) {
-    return { regions: {}, totalCount: 0, skipped: true, reason: 'NASA_FIRMS_API_KEY not configured' };
+    return { regions: {}, totalCount: 0, skipped: true, reason: 'no_data' };
   }
 
   const regions: Record<string, FireDetection[]> = {};
@@ -71,12 +75,14 @@ export function computeRegionStats(regions: Record<string, FireDetection[]>): Fi
     const highIntensity = fires.filter(
       f => f.brightness > 360 && f.confidence === 'FIRE_CONFIDENCE_HIGH',
     );
+    const possibleExplosions = fires.filter(f => f.possibleExplosion);
     stats.push({
       region,
       fires,
       fireCount: fires.length,
       totalFrp: fires.reduce((sum, f) => sum + (f.frp || 0), 0),
       highIntensityCount: highIntensity.length,
+      possibleExplosionCount: possibleExplosions.length,
     });
   }
 

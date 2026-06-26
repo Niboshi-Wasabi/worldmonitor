@@ -8,19 +8,24 @@ export { SITE_VARIANT } from './variant';
 
 // Shared base configuration (always included)
 export {
+  IDLE_PAUSE_MS,
   REFRESH_INTERVALS,
   MONITOR_COLORS,
   STORAGE_KEYS,
+  DEFAULT_MAP_MODE,
+  type MapModePreference,
 } from './variants/base';
 
 // Market data (shared)
 export { SECTORS, COMMODITIES, MARKET_SYMBOLS, CRYPTO_MAP } from './markets';
 
-// Geo data (shared base)
-export { UNDERSEA_CABLES, MAP_URLS } from './geo';
+// Geo data (shared base). UNDERSEA_CABLES + MAP_URLS moved to the lazy geo-map
+// chunk (#4404) — import them directly from '@/config/geo-map', not via this barrel.
 
-// AI Datacenters (shared)
-export { AI_DATA_CENTERS } from './ai-datacenters';
+// AI Datacenters: NOT re-exported on the eager @/config barrel — the ~86KB table
+// is dragged onto the critical path via this re-export. Consumers (map/globe/
+// search) import directly from '@/config/ai-datacenters'; related-assets lazy-
+// loads it. (#4404)
 
 // Feeds configuration (shared functions, variant-specific data)
 export {
@@ -41,6 +46,18 @@ export {
   DEFAULT_MAP_LAYERS,
   MOBILE_DEFAULT_MAP_LAYERS,
   LAYER_TO_SOURCE,
+  ALL_PANELS,
+  VARIANT_DEFAULTS,
+  VARIANT_PANEL_OVERRIDES,
+  getEffectivePanelConfig,
+  isPanelInVariantDefaults,
+  isPanelEntitled,
+  enforceFreePanelLimit,
+  countFreePanelCapUsage,
+  isFreePanelCapCounted,
+  restoreFreeMapPanelAccess,
+  FREE_MAX_PANELS,
+  FREE_MAX_SOURCES,
 } from './panels';
 
 // ============================================
@@ -55,23 +72,27 @@ export {
   INTEL_SOURCES,
 } from './feeds';
 
+// CANONICAL_FEEDS is the union of every variant's feed map — by design it
+// references all *_FEEDS consts, so unlike FEEDS it is NOT tree-shaken per
+// variant (~10KB gz). Required so a panel customized in from another variant
+// can resolve its feeds. See src/config/feed-resolution.ts.
+export { CANONICAL_FEEDS } from './feeds';
+
 export {
   INTEL_HOTSPOTS,
   CONFLICT_ZONES,
+
   MILITARY_BASES,
-  NUCLEAR_FACILITIES,
-  APT_GROUPS,
   STRATEGIC_WATERWAYS,
-  ECONOMIC_CENTERS,
-  SANCTIONED_COUNTRIES,
-  SPACEPORTS,
-  CRITICAL_MINERALS,
 } from './geo';
 
+export { APT_GROUPS } from './apt-groups';
 export { GAMMA_IRRADIATORS } from './irradiators';
 export { PIPELINES, PIPELINE_COLORS } from './pipelines';
 export { PORTS } from './ports';
-export { MONITORED_AIRPORTS, FAA_AIRPORTS } from './airports';
+// MONITORED_AIRPORTS/FAA_AIRPORTS are NOT re-exported on the eager @/config
+// barrel — that pulls the airports table onto the critical path. The only
+// consumer (AviationCommandBar, lazy) imports directly from '@/config/airports'. (#4404)
 export {
   ENTITY_REGISTRY,
   getEntityById,
@@ -90,11 +111,11 @@ export {
   getUpcomingDeadlines,
   getRecentActions,
 } from './ai-regulations';
+// Value re-exports of the tech-geo tables are intentionally NOT on the eager
+// @/config barrel — they pull the ~62KB tech-geo chunk onto the dashboard
+// critical path. Every consumer (search/map/globe/tech-hub services) imports
+// directly from '@/config/tech-geo'. Type re-exports are erased, no edge. (#4404)
 export {
-  STARTUP_HUBS,
-  ACCELERATORS,
-  TECH_HQS,
-  CLOUD_REGIONS,
   type StartupHub,
   type Accelerator,
   type TechHQ,
@@ -115,3 +136,19 @@ export {
 
 // Gulf FDI investment database
 export { GULF_INVESTMENTS } from './gulf-fdi';
+
+// Commodity variant - these are included in commodity builds
+export {
+  COMMODITY_PRICES,
+  COMMODITY_MARKET_SYMBOLS,
+} from './commodity-markets';
+
+export {
+  MINING_SITES,
+  PROCESSING_PLANTS,
+  COMMODITY_PORTS,
+} from './commodity-geo';
+
+// COMMODITY_MINERS: 30+ mining company HQs — not yet rendered on map.
+// Uncomment when a miners layer is added to DeckGLMap.ts.
+// export { COMMODITY_MINERS, type CommodityMiner } from './commodity-miners';

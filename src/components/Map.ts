@@ -5,44 +5,44 @@ import { getCSSColor } from '@/utils';
 import type { Topology, GeometryCollection } from 'topojson-specification';
 import type { Feature, Geometry } from 'geojson';
 import type { MapLayers, Hotspot, NewsItem, InternetOutage, RelatedAsset, AssetType, AisDisruptionEvent, AisDensityZone, CableAdvisory, RepairShip, SocialUnrestEvent, MilitaryFlight, MilitaryVessel, MilitaryFlightCluster, MilitaryVesselCluster, NaturalEvent, CyberThreat, CableHealthRecord } from '@/types';
-import type { AirportDelayAlert } from '@/services/aviation';
+import type { AirportDelayAlert, PositionSample } from '@/services/aviation';
 import type { Earthquake } from '@/services/earthquakes';
+import { type IranEvent, getIranEventCssColor, getIranEventSize } from '@/services/conflict';
 import type { TechHubActivity } from '@/services/tech-activity';
 import type { GeoHubActivity } from '@/services/geo-activity';
 import { getNaturalEventIcon } from '@/services/eonet';
 import type { WeatherAlert } from '@/services/weather';
+import type { RadiationObservation } from '@/services/radiation';
 import { getSeverityColor } from '@/services/weather';
+import { startSmartPollLoop, type SmartPollLoopHandle } from '@/services/smart-poll-loop';
+import { scheduleAfterFirstPaint } from '@/utils/after-paint';
 import {
-  MAP_URLS,
   INTEL_HOTSPOTS,
   CONFLICT_ZONES,
   MILITARY_BASES,
-  UNDERSEA_CABLES,
-  NUCLEAR_FACILITIES,
   GAMMA_IRRADIATORS,
   PIPELINES,
   PIPELINE_COLORS,
-  SANCTIONED_COUNTRIES,
   STRATEGIC_WATERWAYS,
-  APT_GROUPS,
-  ECONOMIC_CENTERS,
-  AI_DATA_CENTERS,
   PORTS,
-  SPACEPORTS,
-  CRITICAL_MINERALS,
   SITE_VARIANT,
-  // Tech variant data
-  STARTUP_HUBS,
-  ACCELERATORS,
-  TECH_HQS,
-  CLOUD_REGIONS,
   // Finance variant data
   STOCK_EXCHANGES,
   FINANCIAL_CENTERS,
   CENTRAL_BANKS,
   COMMODITY_HUBS,
 } from '@/config';
+// Tech-geo + ai-datacenters + geo-map tables imported directly so their chunks stay
+// off the eager @/config barrel and load only with this lazy renderer (#4404).
+import { STARTUP_HUBS, ACCELERATORS, TECH_HQS, CLOUD_REGIONS } from '@/config/tech-geo';
+import { AI_DATA_CENTERS } from '@/config/ai-datacenters';
+import { MAP_URLS, UNDERSEA_CABLES, NUCLEAR_FACILITIES, SANCTIONED_COUNTRIES, ECONOMIC_CENTERS, SPACEPORTS, CRITICAL_MINERALS } from '@/config/geo-map';
+import { pinWebcam, isPinned } from '@/services/webcams/pinned-store';
+import type { WebcamEntry, WebcamCluster } from '@/generated/client/worldmonitor/webcam/v1/service_client';
+import { tokenizeForMatch, matchKeyword, findMatchingKeywords } from '@/utils/keyword-match';
 import { MapPopup } from './MapPopup';
+import type { GetChokepointStatusResponse } from '@/services/supply-chain';
+import type { AcledConflictEvent } from '@/generated/client/worldmonitor/conflict/v1/service_client';
 import {
   updateHotspotEscalation,
   getHotspotEscalation,
@@ -51,18 +51,43 @@ import {
   setGeoAlertGetter,
 } from '@/services/hotspot-escalation';
 import { getCountryScore } from '@/services/country-instability';
+import { getCachedCountryScoreValue } from '@/services/cached-risk-scores';
 import { getAlertsNearLocation } from '@/services/geo-convergence';
+import { getCountryAtCoordinates, getCountryBbox } from '@/services/country-geometry';
+import type { CountryClickPayload } from './DeckGLMap';
 import { t } from '@/services/i18n';
+import type { ScenarioVisualState } from '@/config/scenario-templates';
+import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+import {
+  getLayerExplanation,
+  getLayersForVariant,
+  hasCuratedLayerExplanation,
+  resolveLayerLabel,
+  type MapVariant,
+} from '@/config/map-layer-definitions';
+import { renderLayerExplanationCard } from '@/utils/layer-explanation-card';
+import {
+  createCountryClickGestureTracker,
+  finishCountryClickGesture,
+  shouldSuppressCountryClick,
+  startCountryClickGesture,
+  updateCountryClickGestureDrag,
+} from './map-interaction-guard';
+
 
 export type TimeRange = '1h' | '6h' | '24h' | '48h' | '7d' | 'all';
 export type MapView = 'global' | 'america' | 'mena' | 'eu' | 'asia' | 'latam' | 'africa' | 'oceania';
 
-interface MapState {
+export interface MapState {
   zoom: number;
   pan: { x: number; y: number };
   view: MapView;
   layers: MapLayers;
   timeRange: TimeRange;
+}
+
+export interface MapComponentOptions {
+  chrome?: boolean;
 }
 
 interface HotspotWithBreaking extends Hotspot {
@@ -92,12 +117,12 @@ export class MapComponent {
   private static readonly LAYER_ZOOM_THRESHOLDS: Partial<
     Record<keyof MapLayers, { minZoom: number; showLabels?: number }>
   > = {
-    bases: { minZoom: 3, showLabels: 5 },
-    nuclear: { minZoom: 2 },
-    conflicts: { minZoom: 1, showLabels: 3 },
-    economic: { minZoom: 2 },
-    natural: { minZoom: 1, showLabels: 2 },
-  };
+      bases: { minZoom: 3, showLabels: 5 },
+      nuclear: { minZoom: 2 },
+      conflicts: { minZoom: 1, showLabels: 3 },
+      economic: { minZoom: 2 },
+      natural: { minZoom: 1, showLabels: 2 },
+    };
 
   private container: HTMLElement;
   private svg: d3.Selection<SVGSVGElement, unknown, null, undefined>;
@@ -106,8 +131,10 @@ export class MapComponent {
   private clusterCanvas: HTMLCanvasElement;
   private clusterGl: WebGLRenderingContext | null = null;
   private state: MapState;
+  private layerExplanationOutsideClickHandler: ((event: MouseEvent) => void) | null = null;
   private worldData: WorldTopology | null = null;
   private countryFeatures: Feature<Geometry>[] | null = null;
+  private isResizing = false;
   private baseLayerGroup: d3.Selection<SVGGElement, unknown, null, undefined> | null = null;
   private dynamicLayerGroup: d3.Selection<SVGGElement, unknown, null, undefined> | null = null;
   private baseRendered = false;
@@ -116,14 +143,17 @@ export class MapComponent {
   private hotspots: HotspotWithBreaking[];
   private earthquakes: Earthquake[] = [];
   private weatherAlerts: WeatherAlert[] = [];
+  private radiationObservations: RadiationObservation[] = [];
   private outages: InternetOutage[] = [];
   private aisDisruptions: AisDisruptionEvent[] = [];
   private aisDensity: AisDensityZone[] = [];
   private cableAdvisories: CableAdvisory[] = [];
   private repairShips: RepairShip[] = [];
   private healthByCableId: Record<string, CableHealthRecord> = {};
+  private conflictEvents: AcledConflictEvent[] = [];
   private protests: SocialUnrestEvent[] = [];
   private flightDelays: AirportDelayAlert[] = [];
+  private aircraftPositions: PositionSample[] = [];
   private militaryFlights: MilitaryFlight[] = [];
   private militaryFlightClusters: MilitaryFlightCluster[] = [];
   private militaryVessels: MilitaryVessel[] = [];
@@ -133,6 +163,10 @@ export class MapComponent {
   private techEvents: TechEventMarker[] = [];
   private techActivities: TechHubActivity[] = [];
   private geoActivities: GeoHubActivity[] = [];
+  private iranEvents: IranEvent[] = [];
+  private aptGroups: import('@/types').APTGroup[] = [];
+  private aptGroupsLoaded = false;
+  private webcamData: Array<WebcamEntry | WebcamCluster> = [];
   private news: NewsItem[] = [];
   private onTechHubClick?: (hub: TechHubActivity) => void;
   private onGeoHubClick?: (hub: GeoHubActivity) => void;
@@ -142,6 +176,7 @@ export class MapComponent {
   private onLayerChange?: (layer: keyof MapLayers, enabled: boolean, source: 'user' | 'programmatic') => void;
   private layerZoomOverrides: Partial<Record<keyof MapLayers, boolean>> = {};
   private onStateChange?: (state: MapState) => void;
+  private onCountryClick?: (country: CountryClickPayload) => void;
   private highlightedAssets: Record<AssetType, Set<string>> = {
     pipeline: new Set(),
     cable: new Set(),
@@ -150,15 +185,26 @@ export class MapComponent {
     nuclear: new Set(),
   };
   private boundVisibilityHandler!: () => void;
+  private handleThemeChange: () => void;
+  private resizeObserver: ResizeObserver | null = null;
   private renderScheduled = false;
   private lastRenderTime = 0;
   private readonly MIN_RENDER_INTERVAL_MS = 100;
-  private healthCheckIntervalId: ReturnType<typeof setInterval> | null = null;
+  private healthCheckLoop: SmartPollLoopHandle | null = null;
+  // First render paints the base map (countries) synchronously for LCP, then defers the
+  // heavy dynamic-overlay pass off the first-paint critical path (#4429). Mobile uses this
+  // SVG renderer and its synchronous overlay build was the #1 boot-scripting cost (~1.3s).
+  private initialDynamicRendered = false;
+  private initialDynamicScheduled = false;
+  // Set in destroy(); guards render() (incl. the deferred first-paint callback and the
+  // resize/visibility rAF callbacks) from running on a torn-down instance.
+  private destroyed = false;
 
-  constructor(container: HTMLElement, initialState: MapState) {
+  constructor(container: HTMLElement, initialState: MapState, options: MapComponentOptions = {}) {
     this.container = container;
     this.state = initialState;
     this.hotspots = [...INTEL_HOTSPOTS];
+    const chrome = options.chrome ?? true;
 
     this.wrapper = document.createElement('div');
     this.wrapper.className = 'map-wrapper';
@@ -180,11 +226,19 @@ export class MapComponent {
     this.wrapper.appendChild(this.overlays);
 
     container.appendChild(this.wrapper);
-    container.appendChild(this.createControls());
-    container.appendChild(this.createTimeSlider());
-    container.appendChild(this.createLayerToggles());
-    container.appendChild(this.createLegend());
-    this.healthCheckIntervalId = setInterval(() => this.runHealthCheck(), 30000);
+    if (chrome) {
+      container.appendChild(this.createControls());
+      container.appendChild(this.createTimeSlider());
+      container.appendChild(this.createLayerToggles());
+      container.appendChild(this.createLegend());
+      this.healthCheckLoop = startSmartPollLoop(() => { this.runHealthCheck(); }, {
+        intervalMs: 30_000,
+        pauseWhenHidden: true,
+        refreshOnVisible: false,
+        runImmediately: false,
+        jitterFraction: 0,
+      });
+    }
 
     this.svg = d3.select(svgElement);
     this.baseLayerGroup = this.svg.append('g').attr('class', 'map-base');
@@ -196,16 +250,23 @@ export class MapComponent {
     this.loadMapData();
     this.setupResizeObserver();
 
-    window.addEventListener('theme-changed', () => {
+    this.handleThemeChange = () => {
       this.baseRendered = false;
       this.render();
-    });
+    };
+    window.addEventListener('theme-changed', this.handleThemeChange);
+
+    // Kick off lazy APT load if cyberThreats is already on at init (e.g. from URL/localStorage)
+    if (this.state.layers.cyberThreats && SITE_VARIANT !== 'tech' && SITE_VARIANT !== 'happy') {
+      this.loadAptGroups();
+    }
   }
 
   private setupResizeObserver(): void {
     let lastWidth = 0;
     let lastHeight = 0;
-    const resizeObserver = new ResizeObserver((entries) => {
+    this.resizeObserver = new ResizeObserver((entries) => {
+      if (this.isResizing) return;
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
         if (width > 0 && height > 0 && (width !== lastWidth || height !== lastHeight)) {
@@ -215,7 +276,7 @@ export class MapComponent {
         }
       }
     });
-    resizeObserver.observe(this.container);
+    this.resizeObserver.observe(this.container);
 
     // Re-render when page becomes visible again (after browser throttling)
     this.boundVisibilityHandler = () => {
@@ -226,22 +287,40 @@ export class MapComponent {
     document.addEventListener('visibilitychange', this.boundVisibilityHandler);
   }
 
+  public setIsResizing(value: boolean): void {
+    const wasResizing = this.isResizing;
+    this.isResizing = value;
+    if (wasResizing && !value) {
+      requestAnimationFrame(() => this.render());
+    }
+  }
+
+  public resize(): void {
+    requestAnimationFrame(() => this.render());
+  }
+
   public destroy(): void {
+    this.destroyed = true;
+    window.removeEventListener('theme-changed', this.handleThemeChange);
     document.removeEventListener('visibilitychange', this.boundVisibilityHandler);
-    if (this.healthCheckIntervalId) {
-      clearInterval(this.healthCheckIntervalId);
-      this.healthCheckIntervalId = null;
+    if (this.resizeObserver) {
+      this.resizeObserver.disconnect();
+      this.resizeObserver = null;
+    }
+    if (this.healthCheckLoop) {
+      this.healthCheckLoop.stop();
+      this.healthCheckLoop = null;
     }
   }
 
   private createControls(): HTMLElement {
     const controls = document.createElement('div');
     controls.className = 'map-controls';
-    controls.innerHTML = `
-      <button class="map-control-btn" data-action="zoom-in">+</button>
-      <button class="map-control-btn" data-action="zoom-out">−</button>
-      <button class="map-control-btn" data-action="reset">⟲</button>
-    `;
+    setTrustedHtml(controls, trustedHtml(`
+      <button class="map-control-btn" data-action="zoom-in" aria-label="Zoom in">+</button>
+      <button class="map-control-btn" data-action="zoom-out" aria-label="Zoom out">−</button>
+      <button class="map-control-btn" data-action="reset" aria-label="Reset rotation">⟲</button>
+    `, "legacy direct innerHTML migration"));
 
     controls.addEventListener('click', (e) => {
       const target = e.target as HTMLElement;
@@ -268,17 +347,17 @@ export class MapComponent {
       { value: 'all', label: 'ALL' },
     ];
 
-    slider.innerHTML = `
+    setTrustedHtml(slider, trustedHtml(`
       <span class="time-slider-label">TIME RANGE</span>
       <div class="time-slider-buttons">
         ${ranges
-          .map(
-            (r) =>
-              `<button class="time-btn ${this.state.timeRange === r.value ? 'active' : ''}" data-range="${r.value}">${r.label}</button>`
-          )
-          .join('')}
+        .map(
+          (r) =>
+            `<button class="time-btn ${this.state.timeRange === r.value ? 'active' : ''}" data-range="${r.value}">${r.label}</button>`
+        )
+        .join('')}
       </div>
-    `;
+    `, "legacy direct innerHTML migration"));
 
     slider.addEventListener('click', (e) => {
       const target = e.target as HTMLElement;
@@ -323,6 +402,13 @@ export class MapComponent {
 
 
 
+  private getLayerControlLabel(layer: keyof MapLayers): string {
+    if (layer === 'sanctions') return t('components.deckgl.layerHelp.labels.sanctions');
+
+    const def = getLayersForVariant((SITE_VARIANT || 'full') as MapVariant, 'flat').find(item => item.key === layer);
+    return def ? resolveLayerLabel(def, t) : String(layer);
+  }
+
   private createLayerToggles(): HTMLElement {
     const toggles = document.createElement('div');
     toggles.className = 'layer-toggles';
@@ -330,15 +416,21 @@ export class MapComponent {
 
     // Variant-aware layer buttons
     const fullLayers: (keyof MapLayers)[] = [
+      'iranAttacks',                                      // Iran conflict
       'conflicts', 'hotspots', 'sanctions', 'protests',  // geopolitical
       'bases', 'nuclear', 'irradiators',                 // military/strategic
       'military',                                         // military tracking (flights + vessels)
       'cables', 'pipelines', 'outages', 'datacenters',   // infrastructure
-      // cyberThreats is intentionally hidden on SVG/mobile fallback (DeckGL desktop only)
-      'ais', 'flights',                                   // transport
+      // cyberThreats is intentionally hidden on SVG/mobile fallback (DeckGL desktop only).
+      // storageFacilities + fuelShortages are also DeckGL-only — this file has no
+      // SVG render path for them (see grep for existing 'pipelines' render at :1100).
+      // Adding them here would surface a toggle that produces zero output. They're
+      // already restricted to ['flat'] in LAYER_REGISTRY to hide from globe mode too.
+      'ais', 'flights', 'gpsJamming',                      // transport/interference
       'natural', 'weather',                               // natural
       'economic',                                         // economic
       'waterways',                                        // labels
+      'ciiChoropleth',                                    // CII heat-map (DeckGL only, shown as disabled toggle)
     ];
     const techLayers: (keyof MapLayers)[] = [
       'cables', 'datacenters', 'outages',                // tech infrastructure
@@ -352,48 +444,86 @@ export class MapComponent {
       'sanctions', 'economic', 'waterways',               // geopolitical/economic
       'natural', 'weather',                               // natural events
     ];
-    const layers = SITE_VARIANT === 'tech' ? techLayers : SITE_VARIANT === 'finance' ? financeLayers : fullLayers;
-    const layerLabelKeys: Partial<Record<keyof MapLayers, string>> = {
-      hotspots: 'components.deckgl.layers.intelHotspots',
-      conflicts: 'components.deckgl.layers.conflictZones',
-      bases: 'components.deckgl.layers.militaryBases',
-      nuclear: 'components.deckgl.layers.nuclearSites',
-      irradiators: 'components.deckgl.layers.gammaIrradiators',
-      military: 'components.deckgl.layers.militaryActivity',
-      cables: 'components.deckgl.layers.underseaCables',
-      pipelines: 'components.deckgl.layers.pipelines',
-      outages: 'components.deckgl.layers.internetOutages',
-      datacenters: 'components.deckgl.layers.aiDataCenters',
-      ais: 'components.deckgl.layers.shipTraffic',
-      flights: 'components.deckgl.layers.flightDelays',
-      natural: 'components.deckgl.layers.naturalEvents',
-      weather: 'components.deckgl.layers.weatherAlerts',
-      economic: 'components.deckgl.layers.economicCenters',
-      waterways: 'components.deckgl.layers.strategicWaterways',
-      startupHubs: 'components.deckgl.layers.startupHubs',
-      cloudRegions: 'components.deckgl.layers.cloudRegions',
-      accelerators: 'components.deckgl.layers.accelerators',
-      techHQs: 'components.deckgl.layers.techHQs',
-      techEvents: 'components.deckgl.layers.techEvents',
-      stockExchanges: 'components.deckgl.layers.stockExchanges',
-      financialCenters: 'components.deckgl.layers.financialCenters',
-      centralBanks: 'components.deckgl.layers.centralBanks',
-      commodityHubs: 'components.deckgl.layers.commodityHubs',
-      gulfInvestments: 'components.deckgl.layers.gulfInvestments',
-    };
-    const getLayerLabel = (layer: keyof MapLayers): string => {
-      if (layer === 'sanctions') return t('components.deckgl.layerHelp.labels.sanctions');
-      const key = layerLabelKeys[layer];
-      return key ? t(key) : layer;
+    const happyLayers: (keyof MapLayers)[] = [
+      'positiveEvents', 'kindness', 'happiness', 'speciesRecovery', 'renewableInstallations',
+    ];
+    // Energy variant — SVG/mobile fallback. Only include keys that actually render
+    // in this file (commodityPorts/climate/tradeRoutes/resilienceScore/dayNight do
+    // not, so they're omitted). Mirrors VARIANT_LAYER_ORDER.energy in
+    // src/config/map-layer-definitions.ts but filtered to the SVG-capable subset.
+    const energyLayers: (keyof MapLayers)[] = [
+      'pipelines',                            // oil + gas pipeline registry (Week 2)
+      'waterways',                            // strategic chokepoints
+      'ais',                                  // tanker positions at chokepoints
+      'commodityHubs',                        // energy exchanges / hubs
+      'minerals',                             // critical-minerals + energy-transition overlap
+      'sanctions',                            // energy sanctions flows
+      'outages',                              // power / energy system status
+      'natural',                              // earthquakes near energy infrastructure
+      'weather', 'fires',                     // operational risk
+      'economic',                             // infrastructure context
+    ];
+    const layers = SITE_VARIANT === 'tech' ? techLayers
+                 : SITE_VARIANT === 'finance' ? financeLayers
+                 : SITE_VARIANT === 'happy' ? happyLayers
+                 : SITE_VARIANT === 'energy' ? energyLayers
+                 : fullLayers;
+    const MAX_SVG_LAYERS = 9;
+    const enforceLayerLimit = () => {
+      const allBtns = Array.from(toggles.querySelectorAll<HTMLButtonElement>('.layer-toggle'));
+      const activeBtns = allBtns.filter(b => b.classList.contains('active'));
+      if (activeBtns.length > MAX_SVG_LAYERS) {
+        const excess = activeBtns.slice(MAX_SVG_LAYERS);
+        for (const btn of excess) {
+          btn.classList.remove('active');
+          const layer = btn.dataset.layer as keyof MapLayers | undefined;
+          if (layer) this.toggleLayer(layer);
+        }
+      }
+      const activeCount = allBtns.filter(b => b.classList.contains('active')).length;
+      allBtns.forEach(b => {
+        if (!b.classList.contains('active')) {
+          b.disabled = activeCount >= MAX_SVG_LAYERS;
+          b.classList.toggle('limit-reached', activeCount >= MAX_SVG_LAYERS);
+        } else {
+          b.disabled = false;
+          b.classList.remove('limit-reached');
+        }
+      });
     };
 
     layers.forEach((layer) => {
+      const layerLabel = this.getLayerControlLabel(layer);
+      const explainLabel = `Explain ${layerLabel} layer`;
+      const row = document.createElement('div');
+      row.className = 'layer-toggle-row';
+      row.dataset.layer = layer;
+
       const btn = document.createElement('button');
       btn.className = `layer-toggle ${this.state.layers[layer] ? 'active' : ''}`;
       btn.dataset.layer = layer;
-      btn.textContent = getLayerLabel(layer);
-      btn.addEventListener('click', () => this.toggleLayer(layer));
-      toggles.appendChild(btn);
+      btn.textContent = layerLabel;
+      btn.addEventListener('click', () => {
+        this.toggleLayer(layer);
+        enforceLayerLimit();
+      });
+      row.appendChild(btn);
+
+      const explainBtn = document.createElement('button');
+      explainBtn.type = 'button';
+      explainBtn.className = `layer-explain-btn ${hasCuratedLayerExplanation(layer) ? 'has-layer-explanation' : ''}`;
+      explainBtn.dataset.layer = layer;
+      explainBtn.textContent = 'i';
+      explainBtn.title = explainLabel;
+      explainBtn.setAttribute('aria-label', explainLabel);
+      explainBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.showLayerExplanation(layer);
+      });
+      row.appendChild(explainBtn);
+
+      toggles.appendChild(row);
     });
 
     // Add help button
@@ -401,10 +531,63 @@ export class MapComponent {
     helpBtn.className = 'layer-help-btn';
     helpBtn.textContent = '?';
     helpBtn.title = t('components.deckgl.layerGuide');
+    helpBtn.setAttribute('aria-label', t('components.deckgl.layerGuide'));
     helpBtn.addEventListener('click', () => this.showLayerHelp());
     toggles.appendChild(helpBtn);
+    enforceLayerLimit();
 
     return toggles;
+  }
+
+  private clearLayerExplanationOutsideClickHandler(): void {
+    if (!this.layerExplanationOutsideClickHandler) return;
+    document.removeEventListener('click', this.layerExplanationOutsideClickHandler);
+    this.layerExplanationOutsideClickHandler = null;
+  }
+
+  private showLayerExplanation(layer: keyof MapLayers): void {
+    const existing = this.container.querySelector('.layer-explanation-popup') as HTMLElement | null;
+    this.clearLayerExplanationOutsideClickHandler();
+    if (existing?.dataset.layer === layer) {
+      existing.remove();
+      this.container.querySelector(`.layer-explain-btn[data-layer="${layer}"]`)?.classList.remove('active');
+      return;
+    }
+    existing?.remove();
+    this.container.querySelector('.layer-help-popup')?.remove();
+    this.container.querySelectorAll('.layer-explain-btn.active').forEach(btn => btn.classList.remove('active'));
+
+    const popup = document.createElement('div');
+    popup.className = 'layer-explanation-popup';
+    popup.dataset.layer = layer;
+    setTrustedHtml(popup, trustedHtml(
+      renderLayerExplanationCard(this.getLayerControlLabel(layer), getLayerExplanation(layer)),
+      "static layer explanation metadata",
+    ));
+
+    const closePopup = (): void => {
+      this.clearLayerExplanationOutsideClickHandler();
+      popup.remove();
+      this.container.querySelector(`.layer-explain-btn[data-layer="${layer}"]`)?.classList.remove('active');
+    };
+
+    popup.querySelector('.layer-explanation-close')?.addEventListener('click', closePopup);
+    const content = popup.querySelector('.layer-explanation-content');
+    content?.addEventListener('wheel', (e) => e.stopPropagation(), { passive: false });
+    content?.addEventListener('touchmove', (e) => e.stopPropagation(), { passive: false });
+
+    setTimeout(() => {
+      const closeHandler = (e: MouseEvent) => {
+        if (!popup.contains(e.target as Node)) {
+          closePopup();
+        }
+      };
+      this.layerExplanationOutsideClickHandler = closeHandler;
+      document.addEventListener('click', closeHandler);
+    }, 100);
+
+    this.container.appendChild(popup);
+    this.container.querySelector(`.layer-explain-btn[data-layer="${layer}"]`)?.classList.add('active');
   }
 
   private showLayerHelp(): void {
@@ -413,6 +596,9 @@ export class MapComponent {
       existing.remove();
       return;
     }
+    this.container.querySelector('.layer-explanation-popup')?.remove();
+    this.clearLayerExplanationOutsideClickHandler();
+    this.container.querySelectorAll('.layer-explain-btn.active').forEach(btn => btn.classList.remove('active'));
 
     const popup = document.createElement('div');
     popup.className = 'layer-help-popup';
@@ -431,7 +617,7 @@ export class MapComponent {
     const helpHeader = `
       <div class="layer-help-header">
         <span>${t('components.deckgl.layerHelp.title')}</span>
-        <button class="layer-help-close">×</button>
+        <button class="layer-help-close" aria-label="Close">×</button>
       </div>
     `;
 
@@ -439,23 +625,23 @@ export class MapComponent {
       ${helpHeader}
       <div class="layer-help-content">
         ${helpSection('techEcosystem', [
-          helpItem(label('startupHubs'), 'techStartupHubs'),
-          helpItem(label('cloudRegions'), 'techCloudRegions'),
-          helpItem(label('techHQs'), 'techHQs'),
-          helpItem(label('accelerators'), 'techAccelerators'),
-          helpItem(label('techEvents'), 'techEvents'),
-        ])}
+      helpItem(label('startupHubs'), 'techStartupHubs'),
+      helpItem(label('cloudRegions'), 'techCloudRegions'),
+      helpItem(label('techHQs'), 'techHQs'),
+      helpItem(label('accelerators'), 'techAccelerators'),
+      helpItem(label('techEvents'), 'techEvents'),
+    ])}
         ${helpSection('infrastructure', [
-          helpItem(label('underseaCables'), 'infraCables'),
-          helpItem(label('aiDataCenters'), 'infraDatacenters'),
-          helpItem(label('internetOutages'), 'infraOutages'),
-          helpItem(label('cyberThreats'), 'techCyberThreats'),
-        ])}
+      helpItem(label('underseaCables'), 'infraCables'),
+      helpItem(label('aiDataCenters'), 'infraDatacenters'),
+      helpItem(label('internetOutages'), 'infraOutages'),
+      helpItem(label('cyberThreats'), 'techCyberThreats'),
+    ])}
         ${helpSection('naturalEconomic', [
-          helpItem(label('naturalEvents'), 'naturalEventsTech'),
-          helpItem(label('fires'), 'techFires'),
-          helpItem(staticLabel('countries'), 'countriesOverlay'),
-        ])}
+      helpItem(label('naturalEvents'), 'naturalEventsTech'),
+      helpItem(label('fires'), 'techFires'),
+      helpItem(staticLabel('countries'), 'countriesOverlay'),
+    ])}
       </div>
     `;
 
@@ -463,24 +649,24 @@ export class MapComponent {
       ${helpHeader}
       <div class="layer-help-content">
         ${helpSection('financeCore', [
-          helpItem(label('stockExchanges'), 'financeExchanges'),
-          helpItem(label('financialCenters'), 'financeCenters'),
-          helpItem(label('centralBanks'), 'financeCentralBanks'),
-          helpItem(label('commodityHubs'), 'financeCommodityHubs'),
-          helpItem(label('gulfInvestments'), 'financeGulfInvestments'),
-        ])}
+      helpItem(label('stockExchanges'), 'financeExchanges'),
+      helpItem(label('financialCenters'), 'financeCenters'),
+      helpItem(label('centralBanks'), 'financeCentralBanks'),
+      helpItem(label('commodityHubs'), 'financeCommodityHubs'),
+      helpItem(label('gulfInvestments'), 'financeGulfInvestments'),
+    ])}
         ${helpSection('infrastructureRisk', [
-          helpItem(label('underseaCables'), 'financeCables'),
-          helpItem(label('pipelines'), 'financePipelines'),
-          helpItem(label('internetOutages'), 'financeOutages'),
-          helpItem(label('cyberThreats'), 'financeCyberThreats'),
-        ])}
+      helpItem(label('underseaCables'), 'financeCables'),
+      helpItem(label('pipelines'), 'financePipelines'),
+      helpItem(label('internetOutages'), 'financeOutages'),
+      helpItem(label('cyberThreats'), 'financeCyberThreats'),
+    ])}
         ${helpSection('macroContext', [
-          helpItem(label('economicCenters'), 'economicCenters'),
-          helpItem(label('strategicWaterways'), 'macroWaterways'),
-          helpItem(label('weatherAlerts'), 'weatherAlertsMarket'),
-          helpItem(label('naturalEvents'), 'naturalEventsMacro'),
-        ])}
+      helpItem(label('economicCenters'), 'economicCenters'),
+      helpItem(label('strategicWaterways'), 'macroWaterways'),
+      helpItem(label('weatherAlerts'), 'weatherAlertsMarket'),
+      helpItem(label('naturalEvents'), 'naturalEventsMacro'),
+    ])}
       </div>
     `;
 
@@ -488,55 +674,55 @@ export class MapComponent {
       ${helpHeader}
       <div class="layer-help-content">
         ${helpSection('timeFilter', [
-          helpItem(staticLabel('timeRecent'), 'timeRecent'),
-          helpItem(staticLabel('timeExtended'), 'timeExtended'),
-        ], 'timeAffects')}
+      helpItem(staticLabel('timeRecent'), 'timeRecent'),
+      helpItem(staticLabel('timeExtended'), 'timeExtended'),
+    ], 'timeAffects')}
         ${helpSection('geopolitical', [
-          helpItem(label('conflictZones'), 'geoConflicts'),
-          helpItem(label('intelHotspots'), 'geoHotspots'),
-          helpItem(staticLabel('sanctions'), 'geoSanctions'),
-          helpItem(label('protests'), 'geoProtests'),
-          helpItem(label('ucdpEvents'), 'geoUcdpEvents'),
-          helpItem(label('displacementFlows'), 'geoDisplacement'),
-        ])}
+      helpItem(label('conflictZones'), 'geoConflicts'),
+      helpItem(label('intelHotspots'), 'geoHotspots'),
+      helpItem(staticLabel('sanctions'), 'geoSanctions'),
+      helpItem(label('protests'), 'geoProtests'),
+      helpItem(label('ucdpEvents'), 'geoUcdpEvents'),
+      helpItem(label('displacementFlows'), 'geoDisplacement'),
+    ])}
         ${helpSection('militaryStrategic', [
-          helpItem(label('militaryBases'), 'militaryBases'),
-          helpItem(label('nuclearSites'), 'militaryNuclear'),
-          helpItem(label('gammaIrradiators'), 'militaryIrradiators'),
-          helpItem(label('militaryActivity'), 'militaryActivity'),
-          helpItem(label('spaceports'), 'militarySpaceports'),
-        ])}
+      helpItem(label('militaryBases'), 'militaryBases'),
+      helpItem(label('nuclearSites'), 'militaryNuclear'),
+      helpItem(label('gammaIrradiators'), 'militaryIrradiators'),
+      helpItem(label('militaryActivity'), 'militaryActivity'),
+      helpItem(label('spaceports'), 'militarySpaceports'),
+    ])}
         ${helpSection('infrastructure', [
-          helpItem(label('underseaCables'), 'infraCablesFull'),
-          helpItem(label('pipelines'), 'infraPipelinesFull'),
-          helpItem(label('internetOutages'), 'infraOutages'),
-          helpItem(label('aiDataCenters'), 'infraDatacentersFull'),
-          helpItem(label('cyberThreats'), 'infraCyberThreats'),
-        ])}
+      helpItem(label('underseaCables'), 'infraCablesFull'),
+      helpItem(label('pipelines'), 'infraPipelinesFull'),
+      helpItem(label('internetOutages'), 'infraOutages'),
+      helpItem(label('aiDataCenters'), 'infraDatacentersFull'),
+      helpItem(label('cyberThreats'), 'infraCyberThreats'),
+    ])}
         ${helpSection('transport', [
-          helpItem(label('shipTraffic'), 'transportShipping'),
-          helpItem(label('flightDelays'), 'transportDelays'),
-        ])}
+      helpItem(label('shipTraffic'), 'transportShipping'),
+      helpItem(label('flightDelays'), 'transportDelays'),
+    ])}
         ${helpSection('naturalEconomic', [
-          helpItem(label('naturalEvents'), 'naturalEventsFull'),
-          helpItem(label('fires'), 'firesFull'),
-          helpItem(label('weatherAlerts'), 'weatherAlerts'),
-          helpItem(label('climateAnomalies'), 'climateAnomalies'),
-          helpItem(label('economicCenters'), 'economicCenters'),
-          helpItem(label('criticalMinerals'), 'mineralsFull'),
-        ])}
+      helpItem(label('naturalEvents'), 'naturalEventsFull'),
+      helpItem(label('fires'), 'firesFull'),
+      helpItem(label('weatherAlerts'), 'weatherAlerts'),
+      helpItem(label('climateAnomalies'), 'climateAnomalies'),
+      helpItem(label('economicCenters'), 'economicCenters'),
+      helpItem(label('criticalMinerals'), 'mineralsFull'),
+    ])}
         ${helpSection('labels', [
-          helpItem(staticLabel('countries'), 'countriesOverlay'),
-          helpItem(label('strategicWaterways'), 'waterwaysLabels'),
-        ])}
+      helpItem(staticLabel('countries'), 'countriesOverlay'),
+      helpItem(label('strategicWaterways'), 'waterwaysLabels'),
+    ])}
       </div>
     `;
 
-    popup.innerHTML = SITE_VARIANT === 'tech'
+    setTrustedHtml(popup, trustedHtml(SITE_VARIANT === 'tech'
       ? techHelpContent
       : SITE_VARIANT === 'finance'
-      ? financeHelpContent
-      : fullHelpContent;
+        ? financeHelpContent
+        : fullHelpContent, "legacy direct innerHTML migration"));
 
     popup.querySelector('.layer-help-close')?.addEventListener('click', () => popup.remove());
 
@@ -575,31 +761,33 @@ export class MapComponent {
 
     if (SITE_VARIANT === 'tech') {
       // Tech variant legend
-      legend.innerHTML = `
+      setTrustedHtml(legend, trustedHtml(`
         <div class="map-legend-item"><span class="legend-dot" style="background:#8b5cf6"></span>${escapeHtml(t('components.deckgl.layers.techHQs').toUpperCase())}</div>
         <div class="map-legend-item"><span class="legend-dot" style="background:#06b6d4"></span>${escapeHtml(t('components.deckgl.layers.startupHubs').toUpperCase())}</div>
         <div class="map-legend-item"><span class="legend-dot" style="background:#f59e0b"></span>${escapeHtml(t('components.deckgl.layers.cloudRegions').toUpperCase())}</div>
         <div class="map-legend-item"><span class="map-legend-icon" style="color:#a855f7">📅</span>${escapeHtml(t('components.deckgl.layers.techEvents').toUpperCase())}</div>
         <div class="map-legend-item"><span class="map-legend-icon" style="color:#4ecdc4">💾</span>${escapeHtml(t('components.deckgl.layers.aiDataCenters').toUpperCase())}</div>
-      `;
+      `, "legacy direct innerHTML migration"));
+    } else if (SITE_VARIANT === 'happy') {
+      // Happy variant legend — natural events only
+      setTrustedHtml(legend, trustedHtml(`
+        <div class="map-legend-item"><span class="map-legend-icon earthquake">●</span>${escapeHtml(t('components.deckgl.layers.naturalEvents').toUpperCase())}</div>
+      `, "legacy direct innerHTML migration"));
     } else {
       // Geopolitical variant legend
-      legend.innerHTML = `
+      setTrustedHtml(legend, trustedHtml(`
         <div class="map-legend-item"><span class="legend-dot high"></span>${escapeHtml((t('popups.hotspot.levels.high') ?? 'HIGH').toUpperCase())}</div>
         <div class="map-legend-item"><span class="legend-dot elevated"></span>${escapeHtml((t('popups.hotspot.levels.elevated') ?? 'ELEVATED').toUpperCase())}</div>
         <div class="map-legend-item"><span class="legend-dot low"></span>${escapeHtml((t('popups.monitoring') ?? 'MONITORING').toUpperCase())}</div>
         <div class="map-legend-item"><span class="map-legend-icon conflict">⚔</span>${escapeHtml(t('modals.search.types.conflict').toUpperCase())}</div>
         <div class="map-legend-item"><span class="map-legend-icon earthquake">●</span>${escapeHtml(t('modals.search.types.earthquake').toUpperCase())}</div>
         <div class="map-legend-item"><span class="map-legend-icon apt">⚠</span>APT</div>
-      `;
+      `, "legacy direct innerHTML migration"));
     }
     return legend;
   }
 
   private runHealthCheck(): void {
-    // Skip if page is hidden (no need to check while user isn't looking)
-    if (document.hidden) return;
-
     const svgNode = this.svg.node();
     if (!svgNode) return;
 
@@ -624,6 +812,7 @@ export class MapComponent {
     let lastPos = { x: 0, y: 0 };
     let lastTouchDist = 0;
     let lastTouchCenter = { x: 0, y: 0 };
+    const countryClickGesture = createCountryClickGestureTracker();
     const shouldIgnoreInteractionStart = (target: EventTarget | null): boolean => {
       if (!(target instanceof Element)) return false;
       return Boolean(
@@ -668,6 +857,7 @@ export class MapComponent {
       if (e.button === 0) { // Left click
         isDragging = true;
         lastPos = { x: e.clientX, y: e.clientY };
+        startCountryClickGesture(countryClickGesture, { x: e.clientX, y: e.clientY });
         this.container.style.cursor = 'grabbing';
       }
     });
@@ -677,6 +867,7 @@ export class MapComponent {
 
       const dx = e.clientX - lastPos.x;
       const dy = e.clientY - lastPos.y;
+      updateCountryClickGestureDrag(countryClickGesture, { x: e.clientX, y: e.clientY });
 
       const panSpeed = 1 / this.state.zoom;
       this.state.pan.x += dx * panSpeed;
@@ -689,18 +880,27 @@ export class MapComponent {
     document.addEventListener('mouseup', () => {
       if (isDragging) {
         isDragging = false;
+        finishCountryClickGesture(countryClickGesture);
         this.container.style.cursor = 'grab';
       }
     });
 
-    // Touch events for mobile and trackpad
+    let touchStartPos = { x: 0, y: 0 };
+    let touchDragActive = false;
+    let lastDragEndTime = 0;
+    const TOUCH_DRAG_THRESHOLD = 8;
+    const touchHistory: Array<{ x: number; y: number; t: number }> = [];
+    let inertiaRaf = 0;
+
     this.container.addEventListener('touchstart', (e) => {
       if (shouldIgnoreInteractionStart(e.target)) return;
+      cancelAnimationFrame(inertiaRaf);
       const touch1 = e.touches[0];
       const touch2 = e.touches[1];
 
       if (e.touches.length === 2 && touch1 && touch2) {
         e.preventDefault();
+        touchDragActive = false;
         lastTouchDist = Math.hypot(
           touch2.clientX - touch1.clientX,
           touch2.clientY - touch1.clientY
@@ -711,7 +911,11 @@ export class MapComponent {
         };
       } else if (e.touches.length === 1 && touch1) {
         isDragging = true;
+        touchDragActive = false;
+        touchStartPos = { x: touch1.clientX, y: touch1.clientY };
         lastPos = { x: touch1.clientX, y: touch1.clientY };
+        touchHistory.length = 0;
+        touchHistory.push({ x: touch1.clientX, y: touch1.clientY, t: performance.now() });
       }
     }, { passive: false });
 
@@ -722,7 +926,6 @@ export class MapComponent {
       if (e.touches.length === 2 && touch1 && touch2) {
         e.preventDefault();
 
-        // Pinch zoom
         const dist = Math.hypot(
           touch2.clientX - touch1.clientX,
           touch2.clientY - touch1.clientY
@@ -731,7 +934,6 @@ export class MapComponent {
         this.state.zoom = Math.max(1, Math.min(10, this.state.zoom * scale));
         lastTouchDist = dist;
 
-        // Two-finger pan
         const center = {
           x: (touch1.clientX + touch2.clientX) / 2,
           y: (touch1.clientY + touch2.clientY) / 2,
@@ -743,6 +945,15 @@ export class MapComponent {
 
         this.applyTransform();
       } else if (e.touches.length === 1 && isDragging && touch1) {
+        if (!touchDragActive) {
+          const dx0 = touch1.clientX - touchStartPos.x;
+          const dy0 = touch1.clientY - touchStartPos.y;
+          if (Math.hypot(dx0, dy0) < TOUCH_DRAG_THRESHOLD) return;
+          touchDragActive = true;
+        }
+
+        e.preventDefault();
+
         const dx = touch1.clientX - lastPos.x;
         const dy = touch1.clientY - lastPos.y;
 
@@ -751,16 +962,68 @@ export class MapComponent {
         this.state.pan.y += dy * panSpeed;
 
         lastPos = { x: touch1.clientX, y: touch1.clientY };
+        const now = performance.now();
+        touchHistory.push({ x: touch1.clientX, y: touch1.clientY, t: now });
+        if (touchHistory.length > 4) touchHistory.shift();
+
         this.applyTransform();
       }
     }, { passive: false });
 
     this.container.addEventListener('touchend', () => {
+      if (touchDragActive && touchHistory.length >= 2) {
+        const last = touchHistory[touchHistory.length - 1]!;
+        const first = touchHistory[0]!;
+        const dt = (last.t - first.t) / 1000;
+        if (dt > 0 && dt < 0.3) {
+          let vx = (last.x - first.x) / dt;
+          let vy = (last.y - first.y) / dt;
+          const panSpeed = 1 / this.state.zoom;
+          const decay = 0.92;
+          const animate = () => {
+            vx *= decay;
+            vy *= decay;
+            if (Math.abs(vx) < 10 && Math.abs(vy) < 10) return;
+            this.state.pan.x += (vx / 60) * panSpeed;
+            this.state.pan.y += (vy / 60) * panSpeed;
+            this.applyTransform();
+            inertiaRaf = requestAnimationFrame(animate);
+          };
+          inertiaRaf = requestAnimationFrame(animate);
+        }
+      }
       isDragging = false;
+      if (touchDragActive) lastDragEndTime = performance.now();
+      touchDragActive = false;
       lastTouchDist = 0;
+      touchHistory.length = 0;
     });
 
-    // Set initial cursor
+    this.container.addEventListener('click', (e) => {
+      if (!this.onCountryClick) return;
+      if (performance.now() - lastDragEndTime < 300) return;
+      if (shouldSuppressCountryClick(countryClickGesture)) return;
+      const containerRect = this.container.getBoundingClientRect();
+      const zoom = this.state.zoom;
+      const width = this.container.clientWidth;
+      const height = this.container.clientHeight;
+      const centerOffsetX = (width / 2) * (1 - zoom);
+      const centerOffsetY = (height / 2) * (1 - zoom);
+      const tx = centerOffsetX + this.state.pan.x * zoom;
+      const ty = centerOffsetY + this.state.pan.y * zoom;
+      const rawX = (e.clientX - containerRect.left - tx) / zoom;
+      const rawY = (e.clientY - containerRect.top - ty) / zoom;
+      const projection = this.getProjection(width, height);
+      if (!projection.invert) return;
+      const coords = projection.invert([rawX, rawY]);
+      if (!coords) return;
+      const [lon, lat] = coords;
+      const hit = getCountryAtCoordinates(lat, lon);
+      if (hit) {
+        this.onCountryClick({ lat, lon, code: hit.code, name: hit.name });
+      }
+    });
+
     this.container.style.cursor = 'grab';
   }
 
@@ -814,6 +1077,7 @@ export class MapComponent {
   }
 
   public render(): void {
+    if (this.destroyed) return;
     const now = performance.now();
     if (now - this.lastRenderTime < this.MIN_RENDER_INTERVAL_MS) {
       this.scheduleRender();
@@ -900,6 +1164,24 @@ export class MapComponent {
       // Countries
       this.renderCountries(this.baseLayerGroup, basePath);
       this.baseRendered = true;
+    }
+
+    // Defer the first dynamic-overlay pass off the first-paint critical path. The base map
+    // (countries) above is enough for LCP; the dynamic layer below (cables/pipelines/
+    // conflicts/AIS/cluster markers/overlays) is the heavy synchronous cost (#4429 — ~1.3s
+    // of mobile boot scripting, the #1 mobile-TBT contributor since mobile uses this SVG
+    // renderer). After first paint, render fully so interactions update overlays immediately.
+    if (!this.initialDynamicRendered) {
+      if (!this.initialDynamicScheduled) {
+        this.initialDynamicScheduled = true;
+        scheduleAfterFirstPaint(() => {
+          if (this.destroyed) return;
+          this.initialDynamicRendered = true;
+          this.render();
+        });
+      }
+      this.applyTransform();
+      return;
     }
 
     // Always rebuild dynamic layer - use native DOM clear for reliability
@@ -1238,7 +1520,7 @@ export class MapComponent {
   }
 
   private renderOverlays(projection: d3.GeoProjection): void {
-    this.overlays.innerHTML = '';
+    setTrustedHtml(this.overlays, trustedHtml('', "legacy direct innerHTML migration"));
 
     // Strategic waterways
     if (this.state.layers.waterways) {
@@ -1250,8 +1532,8 @@ export class MapComponent {
       this.renderPorts(projection);
     }
 
-    // APT groups (geopolitical variant only)
-    if (SITE_VARIANT !== 'tech') {
+    // APT groups — rendered only when cyberThreats layer is active, loaded lazily
+    if (this.state.layers.cyberThreats && SITE_VARIANT !== 'tech' && this.aptGroups.length > 0) {
       this.renderAPTMarkers(projection);
     }
 
@@ -1333,9 +1615,44 @@ export class MapComponent {
             x: e.clientX - rect.left,
             y: e.clientY - rect.top,
           });
+          this.popup.loadConflictHistory(zone);
         });
 
         this.overlays.appendChild(clickArea);
+      });
+      this.renderConflictEventMarkers(projection);
+    }
+
+    // Iran events (severity-colored circles matching DeckGL layer)
+    if (this.state.layers.iranAttacks && this.iranEvents.length > 0) {
+      this.iranEvents.forEach((ev) => {
+        const pos = projection([ev.longitude, ev.latitude]);
+        if (!pos || !Number.isFinite(pos[0]) || !Number.isFinite(pos[1])) return;
+
+        const size = getIranEventSize(ev.severity);
+        const color = getIranEventCssColor(ev);
+
+        const div = document.createElement('div');
+        div.className = 'iran-event-marker';
+        div.style.left = `${pos[0]}px`;
+        div.style.top = `${pos[1]}px`;
+        div.style.width = `${size}px`;
+        div.style.height = `${size}px`;
+        div.style.background = color;
+        div.title = `${ev.title} (${ev.category})`;
+
+        div.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const rect = this.container.getBoundingClientRect();
+          this.popup.show({
+            type: 'iranEvent',
+            data: ev,
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top,
+          });
+        });
+
+        this.overlays.appendChild(div);
       });
     }
 
@@ -1350,9 +1667,9 @@ export class MapComponent {
         div.style.left = `${pos[0]}px`;
         div.style.top = `${pos[1]}px`;
 
-        div.innerHTML = `
+        setTrustedHtml(div, trustedHtml(`
           <div class="hotspot-marker ${escapeHtml(spot.level || 'low')}"></div>
-        `;
+        `, "legacy direct innerHTML migration"));
 
         div.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -1507,6 +1824,39 @@ export class MapComponent {
           this.popup.show({
             type: 'weather',
             data: alert,
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top,
+          });
+        });
+
+        this.overlays.appendChild(div);
+      });
+    }
+
+    if (this.state.layers.radiationWatch) {
+      this.radiationObservations.forEach((observation) => {
+        const pos = projection([observation.lon, observation.lat]);
+        if (!pos) return;
+
+        const div = document.createElement('div');
+        const color = observation.severity === 'spike' ? '#ff3030' : '#ffaa00';
+        div.className = `radiation-watch-marker radiation-watch-marker-${observation.severity}`;
+        div.style.left = `${pos[0]}px`;
+        div.style.top = `${pos[1]}px`;
+        div.style.width = '14px';
+        div.style.height = '14px';
+        div.style.borderRadius = '50%';
+        div.style.background = color;
+        div.style.border = '2px solid rgba(255,255,255,0.75)';
+        div.style.boxShadow = `0 0 10px ${color}88`;
+        div.title = `${observation.location}: ${observation.value.toFixed(1)} ${observation.unit}`;
+
+        div.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const rect = this.container.getBoundingClientRect();
+          this.popup.show({
+            type: 'radiation',
+            data: observation,
             x: e.clientX - rect.left,
             y: e.clientY - rect.top,
           });
@@ -2276,7 +2626,12 @@ export class MapComponent {
 
         const icon = document.createElement('div');
         icon.className = 'flight-delay-icon';
-        icon.textContent = delay.delayType === 'ground_stop' ? '🛑' : delay.severity === 'severe' ? '✈️' : '🛫';
+        // #3707: 'unknown' = no telemetry. Use ❔ glyph (consistent with MapPopup)
+        // so users don't see the healthy ✈️ for uncovered airports.
+        icon.textContent = delay.severity === 'unknown' ? '❔'
+          : delay.delayType === 'ground_stop' ? '🛑'
+          : delay.severity === 'severe' ? '✈️'
+          : '🛫';
         div.appendChild(icon);
 
         if (this.state.zoom >= 3) {
@@ -2292,6 +2647,40 @@ export class MapComponent {
           this.popup.show({
             type: 'flight',
             data: delay,
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top,
+          });
+        });
+
+        this.overlays.appendChild(div);
+      });
+    }
+
+    // Aircraft positions (simplified dots in SVG fallback, limited to 200)
+    if (this.state.layers.flights) {
+      this.aircraftPositions.slice(0, 200).forEach((ac) => {
+        const pt = projection([ac.lon, ac.lat]);
+        if (!pt) return;
+
+        const div = document.createElement('div');
+        div.className = 'aircraft-marker';
+        div.style.position = 'absolute';
+        div.style.left = `${pt[0]}px`;
+        div.style.top = `${pt[1]}px`;
+        div.style.transform = `rotate(${ac.trackDeg}deg)`;
+        div.style.fontSize = '12px';
+        div.style.color = ac.onGround ? '#888' : '#a064ff';
+        div.style.lineHeight = '1';
+        div.style.pointerEvents = 'auto';
+        div.style.cursor = 'pointer';
+        div.textContent = '\u25B2'; // ▲
+
+        div.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const rect = this.container.getBoundingClientRect();
+          this.popup.show({
+            type: 'aircraft',
+            data: ac,
             x: e.clientX - rect.left,
             y: e.clientY - rect.top,
           });
@@ -2574,6 +2963,268 @@ export class MapComponent {
         this.overlays.appendChild(dot);
       });
     }
+
+    // Webcam markers (colored circles, gated by zoom >= 2)
+    if (this.state.layers.webcams && this.webcamData.length > 0 && this.state.zoom >= 2) {
+      const CATEGORY_COLORS: Record<string, string> = {
+        traffic: '#ffd700', city: '#00d4ff', landscape: '#45b7d1',
+        nature: '#96ceb4', beach: '#f4a460', water: '#4169e1', other: '#888888',
+      };
+      this.webcamData.forEach((cam) => {
+        const pos = projection([cam.lng, cam.lat]);
+        if (!pos || !Number.isFinite(pos[0]) || !Number.isFinite(pos[1])) return;
+        const isCluster = 'count' in cam;
+        const radius = isCluster ? Math.min(4 + Math.sqrt((cam as WebcamCluster).count), 12) : 3;
+        const size = radius * 2;
+        const color = isCluster ? '#00d4ff' : (CATEGORY_COLORS[(cam as WebcamEntry).category] ?? '#888888');
+        const dot = document.createElement('div');
+        dot.className = 'webcam-dot';
+        dot.style.left = `${pos[0]}px`;
+        dot.style.top = `${pos[1]}px`;
+        dot.style.width = `${size}px`;
+        dot.style.height = `${size}px`;
+        dot.style.position = 'absolute';
+        dot.style.borderRadius = '50%';
+        dot.style.backgroundColor = color;
+        dot.style.opacity = '0.75';
+        dot.style.cursor = 'pointer';
+        dot.title = isCluster ? `${(cam as WebcamCluster).count} webcams` : ((cam as WebcamEntry).title || 'Webcam');
+        dot.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (isCluster) {
+            this.showWebcamClusterPopup(cam as WebcamCluster, e.clientX, e.clientY);
+          } else {
+            this.showWebcamTooltip(cam as WebcamEntry, e.clientX, e.clientY);
+          }
+        });
+        this.overlays.appendChild(dot);
+      });
+    }
+  }
+
+  private renderConflictEventMarkers(projection: d3.GeoProjection): void {
+    const visibleEvents = this.state.timeRange === 'all'
+      ? this.conflictEvents
+      : this.conflictEvents.filter((event) => event.occurredAt >= Date.now() - this.getTimeRangeMs());
+    const clusters = this.clusterMarkers(
+      visibleEvents
+        .map((event) => ({
+          event,
+          lat: event.location?.latitude ?? Number.NaN,
+          lon: event.location?.longitude ?? Number.NaN,
+        }))
+        .filter((item) => Number.isFinite(item.lat) && Number.isFinite(item.lon)),
+      projection,
+      this.state.zoom >= 4 ? 10 : this.state.zoom >= 3 ? 16 : 28,
+      (item) => item.event.country,
+    );
+
+    clusters.forEach((cluster) => {
+      if (cluster.items.length === 0) return;
+      const primary = cluster.items[0]!.event;
+      const fatalities = cluster.items.reduce((sum, item) => sum + (item.event.fatalities || 0), 0);
+      const isCluster = cluster.items.length > 1;
+      const div = document.createElement('div');
+      div.className = `conflict-event-marker${fatalities > 0 ? ' fatal' : ''}${isCluster ? ' cluster' : ''}`;
+      div.style.left = `${cluster.pos[0]}px`;
+      div.style.top = `${cluster.pos[1]}px`;
+      div.title = isCluster
+        ? `${primary.country}: ${cluster.items.length} conflict events${fatalities > 0 ? `, ${fatalities} fatalities` : ''}`
+        : `${primary.country}${primary.admin1 ? `, ${primary.admin1}` : ''}: ${primary.eventType}${primary.fatalities > 0 ? `, ${primary.fatalities} fatalities` : ''}`;
+
+      if (isCluster) {
+        const badge = document.createElement('span');
+        badge.className = 'conflict-event-count';
+        badge.textContent = String(cluster.items.length);
+        div.appendChild(badge);
+      }
+
+        const dot = document.createElement('div');
+        dot.className = 'fire-dot';
+        dot.style.left = `${pos[0]}px`;
+        dot.style.top = `${pos[1]}px`;
+        dot.style.width = `${size}px`;
+        dot.style.height = `${size}px`;
+        dot.style.backgroundColor = color;
+        dot.title = `${fire.region} — ${Math.round(fire.brightness)}K, ${fire.frp}MW`;
+
+        this.overlays.appendChild(dot);
+      });
+    }
+  }
+
+  private makeWebcamTooltipShell(): { tooltip: HTMLDivElement; closeBtn: HTMLButtonElement } {
+    this.container.querySelector('.webcam-tooltip')?.remove();
+    const tooltip = document.createElement('div');
+    tooltip.className = 'webcam-tooltip';
+    tooltip.style.cssText = [
+      'position:absolute',
+      'background:rgba(10,12,16,0.95)',
+      'border:1px solid rgba(60,120,60,0.6)',
+      'padding:8px 12px',
+      'border-radius:3px',
+      'font-size:11px',
+      'font-family:var(--font-mono)',
+      'color:#d4d4d4',
+      'max-width:240px',
+      'z-index:1000',
+      'pointer-events:auto',
+      'line-height:1.5',
+    ].join(';');
+    const closeBtn = document.createElement('button');
+    closeBtn.style.cssText = 'position:absolute;top:4px;right:4px;background:none;border:none;color:#888;cursor:pointer;font-size:14px;line-height:1;padding:2px 4px;';
+    closeBtn.setAttribute('aria-label', 'Close');
+    closeBtn.textContent = '×';
+    closeBtn.addEventListener('click', () => tooltip.remove());
+    tooltip.appendChild(closeBtn);
+    return { tooltip, closeBtn };
+  }
+
+  private placeWebcamTooltip(tooltip: HTMLElement, clientX: number, clientY: number): void {
+    const rect = this.container.getBoundingClientRect();
+    this.container.appendChild(tooltip);
+    const x = Math.min(clientX - rect.left + 10, rect.width - 260);
+    const y = Math.max(clientY - rect.top - 20, 4);
+    tooltip.style.left = `${x}px`;
+    tooltip.style.top = `${y}px`;
+    let hideTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => tooltip.remove(), 8000);
+    tooltip.addEventListener('mouseenter', () => { if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; } });
+    tooltip.addEventListener('mouseleave', () => { hideTimer = setTimeout(() => tooltip.remove(), 2000); });
+  }
+
+  private showWebcamTooltip(cam: WebcamEntry, clientX: number, clientY: number): void {
+    const { tooltip } = this.makeWebcamTooltipShell();
+
+    const title = document.createElement('div');
+    title.style.cssText = 'font-weight:bold;color:#00d4ff;padding-right:18px;';
+    title.textContent = `\u{1F4F7} ${cam.title || cam.category || 'Webcam'}`;
+    tooltip.appendChild(title);
+
+    const meta = document.createElement('div');
+    meta.style.cssText = 'opacity:0.7;font-size:10px;margin-top:2px;';
+    meta.textContent = [cam.country, cam.category].filter(Boolean).join(' \u00B7 ');
+    if (meta.textContent) tooltip.appendChild(meta);
+
+    const previewDiv = document.createElement('div');
+    previewDiv.style.marginTop = '6px';
+    const loadingSpan = document.createElement('span');
+    loadingSpan.style.cssText = 'opacity:0.5;font-size:10px;';
+    loadingSpan.textContent = 'Loading preview...';
+    previewDiv.appendChild(loadingSpan);
+    tooltip.appendChild(previewDiv);
+
+    if (cam.webcamId) {
+      const link = document.createElement('a');
+      link.href = `https://www.windy.com/webcams/${cam.webcamId}`;
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.style.cssText = 'display:block;margin-top:4px;color:#00d4ff;font-size:11px;text-decoration:none;';
+      link.textContent = 'Open on Windy \u2197';
+      tooltip.appendChild(link);
+    }
+
+    this.placeWebcamTooltip(tooltip, clientX, clientY);
+
+    if (cam.webcamId) {
+      import('@/services/webcams').then(({ fetchWebcamImage }) => {
+        fetchWebcamImage(cam.webcamId).then(img => {
+          if (!tooltip.isConnected) return;
+          previewDiv.replaceChildren();
+          if (img.thumbnailUrl) {
+            const imgEl = document.createElement('img');
+            imgEl.src = img.thumbnailUrl;
+            imgEl.style.cssText = 'width:200px;border-radius:4px;margin-bottom:4px;';
+            imgEl.loading = 'lazy';
+            previewDiv.appendChild(imgEl);
+          } else {
+            const span = document.createElement('span');
+            span.style.cssText = 'opacity:0.5;font-size:10px;';
+            span.textContent = 'Preview unavailable';
+            previewDiv.appendChild(span);
+          }
+
+          const pinBtn = document.createElement('button');
+          pinBtn.className = 'webcam-pin-btn';
+          const wcId = cam.webcamId;
+          if (isPinned(wcId)) {
+            pinBtn.classList.add('webcam-pin-btn--pinned');
+            pinBtn.textContent = '\u{1F4CC} Pinned';
+            pinBtn.disabled = true;
+          } else {
+            pinBtn.textContent = '\u{1F4CC} Pin';
+            pinBtn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              pinWebcam({
+                webcamId: wcId,
+                title: cam.title || img?.title || '',
+                lat: cam.lat,
+                lng: cam.lng,
+                category: cam.category || 'other',
+                country: cam.country || '',
+                playerUrl: img?.playerUrl || '',
+              });
+              pinBtn.classList.add('webcam-pin-btn--pinned');
+              pinBtn.textContent = '\u{1F4CC} Pinned';
+              pinBtn.disabled = true;
+            });
+          }
+          tooltip.appendChild(pinBtn);
+        });
+      });
+    } else {
+      previewDiv.remove();
+    }
+  }
+
+  private showWebcamClusterPopup(cam: WebcamCluster, clientX: number, clientY: number): void {
+    const { tooltip } = this.makeWebcamTooltipShell();
+
+    const header = document.createElement('div');
+    header.style.cssText = 'font-weight:bold;color:#00d4ff;padding-right:18px;';
+    header.textContent = `\u{1F4F7} ${cam.count} webcams — loading...`;
+    tooltip.appendChild(header);
+
+    this.placeWebcamTooltip(tooltip, clientX, clientY);
+
+    const currentZoom = this.state.zoom ?? 3;
+    import('@/services/webcams').then(({ fetchWebcams, getClusterCellSize }) => {
+      const margin = Math.max(0.5, getClusterCellSize(currentZoom));
+      fetchWebcams(10, {
+        w: cam.lng - margin, s: cam.lat - margin,
+        e: cam.lng + margin, n: cam.lat + margin,
+      }).then(result => {
+        if (!tooltip.isConnected) return;
+        const webcams = result.webcams.slice(0, 20);
+        header.textContent = `\u{1F4F7} ${webcams.length} webcams`;
+
+        const list = document.createElement('div');
+        list.style.cssText = 'max-height:200px;overflow-y:auto;margin-top:6px;';
+        for (const webcam of webcams) {
+          const item = document.createElement('div');
+          item.style.cssText = 'padding:3px 2px;cursor:pointer;color:#aaa;border-bottom:1px solid rgba(255,255,255,0.08);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+          const nameSpan = document.createElement('span');
+          nameSpan.textContent = webcam.title || webcam.category || 'Webcam';
+          item.appendChild(nameSpan);
+          if (webcam.country) {
+            const cc = document.createElement('span');
+            cc.style.cssText = 'float:right;opacity:0.4;font-size:10px;margin-left:6px;';
+            cc.textContent = webcam.country;
+            item.appendChild(cc);
+          }
+          item.addEventListener('mouseenter', () => { item.style.color = '#00d4ff'; });
+          item.addEventListener('mouseleave', () => { item.style.color = '#aaa'; });
+          item.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.showWebcamTooltip(webcam, e.clientX, e.clientY);
+          });
+          list.appendChild(item);
+        }
+        tooltip.appendChild(list);
+      }).catch(() => {
+        if (!tooltip.isConnected) return;
+        header.textContent = '\u{1F4F7} Failed to load webcam list';
+      });
+    });
   }
 
   private renderWaterways(projection: d3.GeoProjection): void {
@@ -2702,8 +3353,15 @@ export class MapComponent {
     });
   }
 
+  private async loadAptGroups(): Promise<void> {
+    const { APT_GROUPS } = await import('@/config/apt-groups');
+    this.aptGroups = APT_GROUPS;
+    this.aptGroupsLoaded = true;
+    this.render();
+  }
+
   private renderAPTMarkers(projection: d3.GeoProjection): void {
-    APT_GROUPS.forEach((apt) => {
+    this.aptGroups.forEach((apt) => {
       const pos = projection([apt.lon, apt.lat]);
       if (!pos) return;
 
@@ -2711,10 +3369,10 @@ export class MapComponent {
       div.className = 'apt-marker';
       div.style.left = `${pos[0]}px`;
       div.style.top = `${pos[1]}px`;
-      div.innerHTML = `
+      setTrustedHtml(div, trustedHtml(`
         <div class="apt-icon">⚠</div>
         <div class="apt-label">${escapeHtml(apt.name)}</div>
-      `;
+      `, "legacy direct innerHTML migration"));
 
       div.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -2732,32 +3390,27 @@ export class MapComponent {
   }
 
   private getRelatedNews(hotspot: Hotspot): NewsItem[] {
-    // High-priority conflict keywords that indicate the news is really about another topic
-    const conflictTopics = ['gaza', 'ukraine', 'russia', 'israel', 'iran', 'china', 'taiwan', 'korea', 'syria'];
+    const conflictTopics = ['gaza', 'ukraine', 'ukrainian', 'russia', 'russian', 'israel', 'israeli', 'iran', 'iranian', 'china', 'chinese', 'taiwan', 'taiwanese', 'korea', 'korean', 'syria', 'syrian'];
 
     return this.news
       .map((item) => {
-        const titleLower = item.title.toLowerCase();
-        const matchedKeywords = hotspot.keywords.filter((kw) => titleLower.includes(kw.toLowerCase()));
+        const tokens = tokenizeForMatch(item.title);
+        const matchedKeywords = findMatchingKeywords(tokens, hotspot.keywords);
 
         if (matchedKeywords.length === 0) return null;
 
-        // Check if this news mentions other hotspot conflict topics
         const conflictMatches = conflictTopics.filter(t =>
-          titleLower.includes(t) && !hotspot.keywords.some(k => k.toLowerCase().includes(t))
+          matchKeyword(tokens, t) && !hotspot.keywords.some(k => k.toLowerCase().includes(t))
         );
 
-        // If article mentions a major conflict topic that isn't this hotspot, deprioritize heavily
         if (conflictMatches.length > 0) {
-          // Only include if it ALSO has a strong local keyword (city name, agency)
           const strongLocalMatch = matchedKeywords.some(kw =>
             kw.toLowerCase() === hotspot.name.toLowerCase() ||
-            hotspot.agencies?.some(a => titleLower.includes(a.toLowerCase()))
+            hotspot.agencies?.some(a => matchKeyword(tokens, a))
           );
           if (!strongLocalMatch) return null;
         }
 
-        // Score: more keyword matches = more relevant
         const score = matchedKeywords.length;
         return { item, score };
       })
@@ -2776,8 +3429,8 @@ export class MapComponent {
       let matchedCount = 0;
 
       news.forEach((item) => {
-        const titleLower = item.title.toLowerCase();
-        const matches = spot.keywords.filter((kw) => titleLower.includes(kw.toLowerCase()));
+        const tokens = tokenizeForMatch(item.title);
+        const matches = spot.keywords.filter((kw) => matchKeyword(tokens, kw));
 
         if (matches.length > 0) {
           matchedCount++;
@@ -2850,7 +3503,7 @@ export class MapComponent {
   }
 
   public initEscalationGetters(): void {
-    setCIIGetter(getCountryScore);
+    setCIIGetter((code) => getCachedCountryScoreValue(code) ?? getCountryScore(code));
     setGeoAlertGetter(getAlertsNearLocation);
   }
 
@@ -2862,7 +3515,7 @@ export class MapComponent {
     return getHotspotEscalation(hotspotId);
   }
 
-  public setView(view: MapView): void {
+  public setView(view: MapView, zoom?: number): void {
     this.state.view = view;
 
     // Region-specific zoom and pan settings
@@ -2879,7 +3532,7 @@ export class MapComponent {
     };
 
     const settings = viewSettings[view];
-    this.state.zoom = settings.zoom;
+    this.state.zoom = zoom ?? settings.zoom;
     this.state.pan = settings.pan;
     this.applyTransform();
     this.render();
@@ -2931,6 +3584,14 @@ export class MapComponent {
     if (btn) {
       (btn as HTMLElement).style.display = 'none';
     }
+  }
+
+  public setChokepointData(data: GetChokepointStatusResponse | null): void {
+    this.popup.setChokepointData(data);
+  }
+
+  public setScenarioState(_state: ScenarioVisualState | null): void {
+    // SVG renderer: scenario fill deferred (no iso2 data binding on country elements)
   }
 
   public setLayerLoading(layer: keyof MapLayers, loading: boolean): void {
@@ -3015,6 +3676,7 @@ export class MapComponent {
       x: pos[0],
       y: pos[1],
     });
+    this.popup.loadConflictHistory(conflict);
   }
 
   public triggerBaseClick(id: string): void {
@@ -3150,7 +3812,9 @@ export class MapComponent {
 
     if (assets) {
       assets.forEach((asset) => {
-        this.highlightedAssets[asset.type].add(asset.id);
+        if (asset?.type && this.highlightedAssets[asset.type]) {
+          this.highlightedAssets[asset.type].add(asset.id);
+        }
       });
     }
 
@@ -3281,7 +3945,7 @@ export class MapComponent {
         const dx = Math.abs((rect.left + rect.width / 2) - (vr.left + vr.width / 2));
         const dy = Math.abs((rect.top + rect.height / 2) - (vr.top + vr.height / 2));
         return dx < (rect.width + vr.width) / 2 + minDistance &&
-               dy < (rect.height + vr.height) / 2 + minDistance;
+          dy < (rect.height + vr.height) / 2 + minDistance;
       });
 
       if (overlaps && zoom < 2) {
@@ -3299,6 +3963,35 @@ export class MapComponent {
 
   public onTimeRangeChanged(callback: (range: TimeRange) => void): void {
     this.onTimeRangeChange = callback;
+  }
+
+  public setOnCountryClick(cb: (country: CountryClickPayload) => void): void {
+    this.onCountryClick = cb;
+  }
+
+  public fitCountry(code: string): void {
+    const bbox = getCountryBbox(code);
+    if (!bbox) return;
+    const [minLon, minLat, maxLon, maxLat] = bbox;
+    const midLon = (minLon + maxLon) / 2;
+    const midLat = (minLat + maxLat) / 2;
+    const width = this.container.clientWidth;
+    const height = this.container.clientHeight;
+    const projection = this.getProjection(width, height);
+    const topLeft = projection([minLon, maxLat]);
+    const bottomRight = projection([maxLon, minLat]);
+    if (!topLeft || !bottomRight) {
+      this.state.zoom = 4;
+      this.setCenter(midLat, midLon);
+      return;
+    }
+    const pxWidth = Math.abs(bottomRight[0] - topLeft[0]);
+    const pxHeight = Math.abs(bottomRight[1] - topLeft[1]);
+    const padFactor = 0.8;
+    const zoomX = pxWidth > 0 ? (width * padFactor) / pxWidth : 4;
+    const zoomY = pxHeight > 0 ? (height * padFactor) / pxHeight : 4;
+    this.state.zoom = Math.max(1, Math.min(8, Math.min(zoomX, zoomY)));
+    this.setCenter(midLat, midLon);
   }
 
   public getState(): MapState {
@@ -3375,7 +4068,9 @@ export class MapComponent {
   }
 
   public setLayers(layers: MapLayers): void {
+    const prevCyber = this.state.layers.cyberThreats;
     this.state.layers = { ...layers };
+    if (this.state.layers.cyberThreats && !prevCyber && !this.aptGroupsLoaded) this.loadAptGroups();
     this.syncLayerButtons();
     this.render();
   }
@@ -3392,6 +4087,11 @@ export class MapComponent {
 
   public setWeatherAlerts(alerts: WeatherAlert[]): void {
     this.weatherAlerts = alerts;
+    this.render();
+  }
+
+  public setRadiationObservations(observations: RadiationObservation[]): void {
+    this.radiationObservations = observations;
     this.render();
   }
 
@@ -3418,6 +4118,11 @@ export class MapComponent {
     this.render();
   }
 
+  public setConflictEvents(events: AcledConflictEvent[]): void {
+    this.conflictEvents = events;
+    this.render();
+  }
+
   public setProtests(events: SocialUnrestEvent[]): void {
     this.protests = events;
     this.render();
@@ -3425,6 +4130,11 @@ export class MapComponent {
 
   public setFlightDelays(delays: AirportDelayAlert[]): void {
     this.flightDelays = delays;
+    this.render();
+  }
+
+  public setAircraftPositions(positions: PositionSample[]): void {
+    this.aircraftPositions = positions;
     this.render();
   }
 
@@ -3450,6 +4160,11 @@ export class MapComponent {
     this.render();
   }
 
+  public setWebcams(markers: Array<WebcamEntry | WebcamCluster>): void {
+    this.webcamData = markers;
+    this.render();
+  }
+
   public setTechEvents(events: TechEventMarker[]): void {
     this.techEvents = events;
     this.render();
@@ -3457,6 +4172,11 @@ export class MapComponent {
 
   public setCyberThreats(_threats: CyberThreat[]): void {
     // SVG/mobile fallback intentionally does not render this layer to stay lightweight.
+  }
+
+  public setIranEvents(events: IranEvent[]): void {
+    this.iranEvents = events;
+    this.render();
   }
 
   public setNewsLocations(_data: Array<{ lat: number; lon: number; title: string; threatLevel: string; timestamp?: Date }>): void {

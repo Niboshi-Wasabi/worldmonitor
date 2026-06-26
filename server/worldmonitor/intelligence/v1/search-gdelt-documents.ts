@@ -2,98 +2,63 @@ import type {
   ServerContext,
   SearchGdeltDocumentsRequest,
   SearchGdeltDocumentsResponse,
-  GdeltArticle,
 } from '../../../../src/generated/server/worldmonitor/intelligence/v1/service_server';
 
-import { UPSTREAM_TIMEOUT_MS } from './_shared';
-import { CHROME_UA } from '../../../_shared/constants';
-import { getCachedJson, setCachedJson } from '../../../_shared/redis';
+import { getCachedJson } from '../../../_shared/redis';
 
-const REDIS_CACHE_KEY = 'intel:gdelt-docs:v1';
-const REDIS_CACHE_TTL = 600; // 10 min
+const SEEDED_KEY = 'intelligence:gdelt-intel:v1';
 
-// ========================================================================
-// Constants
-// ========================================================================
+// All GDELT fetching happens in the Railway seed script
+// (scripts/seed-gdelt-intel.mjs). This handler reads pre-seeded
+// topic data from Redis only (gold standard: Vercel reads, Railway writes).
 
-const GDELT_MAX_RECORDS = 20;
-const GDELT_DEFAULT_RECORDS = 10;
-const GDELT_DOC_API = 'https://api.gdeltproject.org/api/v2/doc/doc';
-
-// ========================================================================
-// RPC handler
-// ========================================================================
+type SeededGdeltData = {
+  topics?: Array<{
+    id: string;
+    articles: Array<{
+      title: string;
+      url: string;
+      source: string;
+      date: string;
+      image: string;
+      language: string;
+      tone: number;
+    }>;
+  }>;
+};
 
 export async function searchGdeltDocuments(
   _ctx: ServerContext,
   req: SearchGdeltDocumentsRequest,
 ): Promise<SearchGdeltDocumentsResponse> {
-  const query = req.query;
-  if (!query || query.length < 2) {
-    return { articles: [], query: query || '', error: 'Query parameter required (min 2 characters)' };
+  if (!req.query || req.query.length < 2) {
+    return { articles: [], query: req.query || '', error: 'Query parameter required' };
   }
 
-  const maxRecords = Math.min(
-    req.maxRecords > 0 ? req.maxRecords : GDELT_DEFAULT_RECORDS,
-    GDELT_MAX_RECORDS,
-  );
-  const timespan = req.timespan || '72h';
-
   try {
-    const cacheKey = `${REDIS_CACHE_KEY}:${query}:${timespan}:${maxRecords}`;
-    const cached = (await getCachedJson(cacheKey)) as SearchGdeltDocumentsResponse | null;
-    if (cached?.articles?.length) return cached;
-
-    const gdeltUrl = new URL(GDELT_DOC_API);
-    gdeltUrl.searchParams.set('query', query);
-    gdeltUrl.searchParams.set('mode', 'artlist');
-    gdeltUrl.searchParams.set('maxrecords', maxRecords.toString());
-    gdeltUrl.searchParams.set('format', 'json');
-    gdeltUrl.searchParams.set('sort', 'date');
-    gdeltUrl.searchParams.set('timespan', timespan);
-
-    const response = await fetch(gdeltUrl.toString(), {
-      headers: { 'User-Agent': CHROME_UA },
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-    });
-
-    if (!response.ok) {
-      throw new Error(`GDELT returned ${response.status}`);
+    const seeded = await getCachedJson(SEEDED_KEY, true) as SeededGdeltData | null;
+    if (!seeded?.topics?.length) {
+      // Distinct signal: seed is missing/expired, not "no articles matched".
+      // Clients should show a graceful empty state rather than retrying.
+      return { articles: [], query: req.query, error: 'seed-unavailable' };
     }
 
-    const data = (await response.json()) as {
-      articles?: Array<{
-        title?: string;
-        url?: string;
-        domain?: string;
-        source?: { domain?: string };
-        seendate?: string;
-        socialimage?: string;
-        language?: string;
-        tone?: number;
-      }>;
-    };
+    const queryLower = req.query.toLowerCase();
+    const match = seeded.topics.find(t =>
+      queryLower.includes(t.id) || t.articles.some(a => a.title.toLowerCase().includes(queryLower.slice(0, 20)))
+    );
 
-    const articles: GdeltArticle[] = (data.articles || []).map((article) => ({
-      title: article.title || '',
-      url: article.url || '',
-      source: article.domain || article.source?.domain || '',
-      date: article.seendate || '',
-      image: article.socialimage || '',
-      language: article.language || '',
-      tone: typeof article.tone === 'number' ? article.tone : 0,
-    }));
-
-    const result: SearchGdeltDocumentsResponse = { articles, query, error: '' };
-    if (articles.length > 0) {
-      setCachedJson(cacheKey, result, REDIS_CACHE_TTL).catch(() => {});
+    if (!match) {
+      return { articles: [], query: req.query, error: '' };
     }
-    return result;
-  } catch (error) {
+
+    const maxRecords = Math.min(req.maxRecords > 0 ? req.maxRecords : 10, 20);
     return {
-      articles: [],
-      query,
-      error: error instanceof Error ? error.message : 'Unknown error',
+      articles: match.articles.slice(0, maxRecords),
+      query: req.query,
+      error: '',
     };
+  } catch {
+    return { articles: [], query: req.query, error: '' };
   }
 }

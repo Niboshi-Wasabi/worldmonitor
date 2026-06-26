@@ -9,6 +9,7 @@ export interface ListMarketQuotesResponse {
   quotes: MarketQuote[];
   finnhubSkipped: boolean;
   skipReason: string;
+  rateLimited: boolean;
 }
 
 export interface MarketQuote {
@@ -34,6 +35,7 @@ export interface CryptoQuote {
   price: number;
   change: number;
   sparkline: number[];
+  change7d: number;
 }
 
 export interface ListCommodityQuotesRequest {
@@ -106,6 +108,7 @@ export interface ListEtfFlowsResponse {
   timestamp: string;
   summary?: EtfFlowsSummary;
   etfs: EtfFlow[];
+  rateLimited: boolean;
 }
 
 export interface EtfFlowsSummary {
@@ -142,6 +145,506 @@ export interface GetCountryStockIndexResponse {
   weekChangePercent: number;
   currency: string;
   fetchedAt: string;
+}
+
+export interface ListGulfQuotesRequest {
+}
+
+export interface ListGulfQuotesResponse {
+  quotes: GulfQuote[];
+  rateLimited: boolean;
+}
+
+export interface GulfQuote {
+  symbol: string;
+  name: string;
+  flag: string;
+  country: string;
+  type: string;
+  price: number;
+  change: number;
+  sparkline: number[];
+}
+
+export interface AnalyzeStockRequest {
+  symbol: string;
+  name: string;
+  includeNews: boolean;
+}
+
+export interface AnalyzeStockResponse {
+  available: boolean;
+  symbol: string;
+  name: string;
+  display: string;
+  currency: string;
+  currentPrice: number;
+  changePercent: number;
+  signalScore: number;
+  signal: string;
+  trendStatus: string;
+  volumeStatus: string;
+  macdStatus: string;
+  rsiStatus: string;
+  summary: string;
+  action: string;
+  confidence: string;
+  technicalSummary: string;
+  newsSummary: string;
+  whyNow: string;
+  bullishFactors: string[];
+  riskFactors: string[];
+  supportLevels: number[];
+  resistanceLevels: number[];
+  headlines: StockAnalysisHeadline[];
+  ma5: number;
+  ma10: number;
+  ma20: number;
+  ma60: number;
+  biasMa5: number;
+  biasMa10: number;
+  biasMa20: number;
+  volumeRatio5d: number;
+  rsi12: number;
+  macdDif: number;
+  macdDea: number;
+  macdBar: number;
+  provider: string;
+  model: string;
+  fallback: boolean;
+  newsSearched: boolean;
+  generatedAt: string;
+  analysisId: string;
+  analysisAt: number;
+  stopLoss: number;
+  takeProfit: number;
+  engineVersion: string;
+  analystConsensus?: AnalystConsensus;
+  priceTarget?: PriceTarget;
+  recentUpgrades: UpgradeDowngrade[];
+  dividendYield: number;
+  trailingAnnualDividendRate: number;
+  exDividendDate: number;
+  payoutRatio?: number;
+  dividendFrequency: string;
+  dividendCagr: number;
+}
+
+export interface StockAnalysisHeadline {
+  title: string;
+  source: string;
+  link: string;
+  publishedAt: number;
+}
+
+export interface AnalystConsensus {
+  strongBuy: number;
+  buy: number;
+  hold: number;
+  sell: number;
+  strongSell: number;
+  total: number;
+  period: string;
+}
+
+export interface PriceTarget {
+  high?: number;
+  low?: number;
+  mean?: number;
+  median?: number;
+  current?: number;
+  numberOfAnalysts: number;
+}
+
+export interface UpgradeDowngrade {
+  firm: string;
+  toGrade: string;
+  fromGrade: string;
+  action: string;
+  epochGradeDate: number;
+}
+
+export interface GetStockAnalysisHistoryRequest {
+  symbols: string[];
+  limitPerSymbol: number;
+  includeNews: boolean;
+}
+
+export interface GetStockAnalysisHistoryResponse {
+  items: StockAnalysisHistoryItem[];
+}
+
+export interface StockAnalysisHistoryItem {
+  symbol: string;
+  snapshots: AnalyzeStockResponse[];
+}
+
+export interface BacktestStockRequest {
+  symbol: string;
+  name: string;
+  evalWindowDays: number;
+}
+
+export interface BacktestStockResponse {
+  available: boolean;
+  symbol: string;
+  name: string;
+  display: string;
+  currency: string;
+  evalWindowDays: number;
+  evaluationsRun: number;
+  actionableEvaluations: number;
+  winRate: number;
+  directionAccuracy: number;
+  avgSimulatedReturnPct: number;
+  cumulativeSimulatedReturnPct: number;
+  latestSignal: string;
+  latestSignalScore: number;
+  summary: string;
+  generatedAt: string;
+  evaluations: BacktestStockEvaluation[];
+  engineVersion: string;
+}
+
+export interface BacktestStockEvaluation {
+  analysisAt: number;
+  signal: string;
+  signalScore: number;
+  entryPrice: number;
+  exitPrice: number;
+  simulatedReturnPct: number;
+  directionCorrect: boolean;
+  outcome: string;
+  stopLoss: number;
+  takeProfit: number;
+  analysisId: string;
+}
+
+export interface ListStoredStockBacktestsRequest {
+  symbols: string[];
+  evalWindowDays: number;
+}
+
+export interface ListStoredStockBacktestsResponse {
+  items: BacktestStockResponse[];
+}
+
+export interface ListCryptoSectorsRequest {
+}
+
+export interface ListCryptoSectorsResponse {
+  sectors: CryptoSector[];
+}
+
+export interface CryptoSector {
+  id: string;
+  name: string;
+  change: number;
+}
+
+export interface ListDefiTokensRequest {
+}
+
+export interface ListDefiTokensResponse {
+  tokens: CryptoQuote[];
+}
+
+export interface ListAiTokensRequest {
+}
+
+export interface ListAiTokensResponse {
+  tokens: CryptoQuote[];
+}
+
+export interface ListOtherTokensRequest {
+}
+
+export interface ListOtherTokensResponse {
+  tokens: CryptoQuote[];
+}
+
+export interface GetFearGreedIndexRequest {
+}
+
+export interface GetFearGreedIndexResponse {
+  compositeScore: number;
+  compositeLabel: string;
+  previousScore: number;
+  seededAt: string;
+  sentiment?: FearGreedCategory;
+  volatility?: FearGreedCategory;
+  positioning?: FearGreedCategory;
+  trend?: FearGreedCategory;
+  breadth?: FearGreedCategory;
+  momentum?: FearGreedCategory;
+  liquidity?: FearGreedCategory;
+  credit?: FearGreedCategory;
+  macro?: FearGreedCategory;
+  crossAsset?: FearGreedCategory;
+  vix: number;
+  hySpread: number;
+  yield10y: number;
+  putCallRatio: number;
+  pctAbove200d: number;
+  cnnFearGreed: number;
+  cnnLabel: string;
+  aaiiBull: number;
+  aaiiBear: number;
+  fedRate: string;
+  unavailable: boolean;
+  fsiValue: number;
+  fsiLabel: string;
+  hygPrice: number;
+  tltPrice: number;
+  sectorPerformance: FearGreedSectorPerformance[];
+}
+
+export interface FearGreedCategory {
+  score: number;
+  weight: number;
+  contribution: number;
+  degraded: boolean;
+  inputsJson: string;
+}
+
+export interface FearGreedSectorPerformance {
+  symbol: string;
+  name: string;
+  change1d: number;
+}
+
+export interface ListEarningsCalendarRequest {
+  fromDate: string;
+  toDate: string;
+}
+
+export interface ListEarningsCalendarResponse {
+  earnings: EarningsEntry[];
+  fromDate: string;
+  toDate: string;
+  total: number;
+  unavailable: boolean;
+}
+
+export interface EarningsEntry {
+  symbol: string;
+  company: string;
+  date: string;
+  hour: string;
+  epsEstimate: number;
+  revenueEstimate: number;
+  epsActual: number;
+  revenueActual: number;
+  hasActuals: boolean;
+  surpriseDirection: string;
+}
+
+export interface GetCotPositioningRequest {
+}
+
+export interface GetCotPositioningResponse {
+  instruments: CotInstrument[];
+  reportDate: string;
+  unavailable: boolean;
+}
+
+export interface CotInstrument {
+  name: string;
+  code: string;
+  reportDate: string;
+  assetManagerLong: string;
+  assetManagerShort: string;
+  leveragedFundsLong: string;
+  leveragedFundsShort: string;
+  dealerLong: string;
+  dealerShort: string;
+  netPct: number;
+}
+
+export interface GetInsiderTransactionsRequest {
+  symbol: string;
+}
+
+export interface GetInsiderTransactionsResponse {
+  unavailable: boolean;
+  symbol: string;
+  totalBuys: number;
+  totalSells: number;
+  netValue: number;
+  transactions: InsiderTransaction[];
+  fetchedAt: string;
+}
+
+export interface InsiderTransaction {
+  name: string;
+  shares: number;
+  value: number;
+  transactionCode: string;
+  transactionDate: string;
+}
+
+export interface GetMarketBreadthHistoryRequest {
+}
+
+export interface GetMarketBreadthHistoryResponse {
+  currentPctAbove20d?: number;
+  currentPctAbove50d?: number;
+  currentPctAbove200d?: number;
+  updatedAt: string;
+  history: BreadthSnapshot[];
+  unavailable: boolean;
+}
+
+export interface BreadthSnapshot {
+  date: string;
+  pctAbove20d?: number;
+  pctAbove50d?: number;
+  pctAbove200d?: number;
+}
+
+export interface GetGoldIntelligenceRequest {
+}
+
+export interface GetGoldIntelligenceResponse {
+  goldPrice: number;
+  goldChangePct: number;
+  goldSparkline: number[];
+  silverPrice: number;
+  platinumPrice: number;
+  palladiumPrice: number;
+  goldSilverRatio?: number;
+  goldPlatinumPremiumPct?: number;
+  crossCurrencyPrices: GoldCrossCurrencyPrice[];
+  cot?: GoldCotPositioning;
+  updatedAt: string;
+  unavailable: boolean;
+  session?: GoldSessionRange;
+  returns?: GoldReturns;
+  range52w?: GoldRange52w;
+  drivers: GoldDriver[];
+  etfFlows?: GoldEtfFlows;
+  cbReserves?: GoldCbReserves;
+}
+
+export interface GoldCrossCurrencyPrice {
+  currency: string;
+  flag: string;
+  price: number;
+}
+
+export interface GoldCotPositioning {
+  reportDate: string;
+  nextReleaseDate: string;
+  openInterest: string;
+  managedMoney?: GoldCotCategory;
+  producerSwap?: GoldCotCategory;
+}
+
+export interface GoldCotCategory {
+  longPositions: string;
+  shortPositions: string;
+  netPct: number;
+  oiSharePct: number;
+  wowNetDelta: string;
+}
+
+export interface GoldSessionRange {
+  dayHigh: number;
+  dayLow: number;
+  prevClose: number;
+}
+
+export interface GoldReturns {
+  w1: number;
+  m1: number;
+  ytd: number;
+  y1: number;
+}
+
+export interface GoldRange52w {
+  hi: number;
+  lo: number;
+  positionPct: number;
+}
+
+export interface GoldDriver {
+  symbol: string;
+  label: string;
+  value: number;
+  changePct: number;
+  correlation30d: number;
+}
+
+export interface GoldEtfFlows {
+  asOfDate: string;
+  tonnes: number;
+  aumUsd: number;
+  nav: number;
+  changeW1Tonnes: number;
+  changeM1Tonnes: number;
+  changeY1Tonnes: number;
+  changeW1Pct: number;
+  changeM1Pct: number;
+  changeY1Pct: number;
+  sparkline90d: number[];
+}
+
+export interface GoldCbReserves {
+  asOfMonth: string;
+  totalTonnes: number;
+  topHolders: GoldCbHolder[];
+  topBuyers12m: GoldCbMover[];
+  topSellers12m: GoldCbMover[];
+}
+
+export interface GoldCbHolder {
+  iso3: string;
+  name: string;
+  tonnes: number;
+  pctOfReserves: number;
+}
+
+export interface GoldCbMover {
+  iso3: string;
+  name: string;
+  deltaTonnes12m: number;
+}
+
+export interface GetHyperliquidFlowRequest {
+}
+
+export interface GetHyperliquidFlowResponse {
+  ts: string;
+  fetchedAt: string;
+  warmup: boolean;
+  assetCount: number;
+  assets: HyperliquidAssetFlow[];
+  unavailable: boolean;
+}
+
+export interface HyperliquidAssetFlow {
+  symbol: string;
+  display: string;
+  assetClass: string;
+  group: string;
+  funding: string;
+  openInterest: string;
+  markPx: string;
+  oraclePx: string;
+  dayNotional: string;
+  fundingScore: number;
+  volumeScore: number;
+  oiScore: number;
+  basisScore: number;
+  composite: number;
+  sparkFunding: number[];
+  sparkOi: number[];
+  sparkScore: number[];
+  warmup: boolean;
+  stale: boolean;
+  staleSince: string;
+  missingPolls: number;
+  alerts: string[];
 }
 
 export interface FieldViolation {
@@ -194,7 +697,9 @@ export class MarketServiceClient {
 
   async listMarketQuotes(req: ListMarketQuotesRequest, options?: MarketServiceCallOptions): Promise<ListMarketQuotesResponse> {
     let path = "/api/market/v1/list-market-quotes";
-    const url = this.baseURL + path;
+    const params = new URLSearchParams();
+    if (req.symbols && req.symbols.length > 0) req.symbols.forEach(v => params.append("symbols", v));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -203,9 +708,8 @@ export class MarketServiceClient {
     };
 
     const resp = await this.fetchFn(url, {
-      method: "POST",
+      method: "GET",
       headers,
-      body: JSON.stringify(req),
       signal: options?.signal,
     });
 
@@ -218,7 +722,9 @@ export class MarketServiceClient {
 
   async listCryptoQuotes(req: ListCryptoQuotesRequest, options?: MarketServiceCallOptions): Promise<ListCryptoQuotesResponse> {
     let path = "/api/market/v1/list-crypto-quotes";
-    const url = this.baseURL + path;
+    const params = new URLSearchParams();
+    if (req.ids && req.ids.length > 0) req.ids.forEach(v => params.append("ids", v));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -227,9 +733,8 @@ export class MarketServiceClient {
     };
 
     const resp = await this.fetchFn(url, {
-      method: "POST",
+      method: "GET",
       headers,
-      body: JSON.stringify(req),
       signal: options?.signal,
     });
 
@@ -242,7 +747,9 @@ export class MarketServiceClient {
 
   async listCommodityQuotes(req: ListCommodityQuotesRequest, options?: MarketServiceCallOptions): Promise<ListCommodityQuotesResponse> {
     let path = "/api/market/v1/list-commodity-quotes";
-    const url = this.baseURL + path;
+    const params = new URLSearchParams();
+    if (req.symbols && req.symbols.length > 0) req.symbols.forEach(v => params.append("symbols", v));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -251,9 +758,8 @@ export class MarketServiceClient {
     };
 
     const resp = await this.fetchFn(url, {
-      method: "POST",
+      method: "GET",
       headers,
-      body: JSON.stringify(req),
       signal: options?.signal,
     });
 
@@ -266,7 +772,9 @@ export class MarketServiceClient {
 
   async getSectorSummary(req: GetSectorSummaryRequest, options?: MarketServiceCallOptions): Promise<GetSectorSummaryResponse> {
     let path = "/api/market/v1/get-sector-summary";
-    const url = this.baseURL + path;
+    const params = new URLSearchParams();
+    if (req.period != null && req.period !== "") params.set("period", String(req.period));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -275,9 +783,8 @@ export class MarketServiceClient {
     };
 
     const resp = await this.fetchFn(url, {
-      method: "POST",
+      method: "GET",
       headers,
-      body: JSON.stringify(req),
       signal: options?.signal,
     });
 
@@ -290,7 +797,9 @@ export class MarketServiceClient {
 
   async listStablecoinMarkets(req: ListStablecoinMarketsRequest, options?: MarketServiceCallOptions): Promise<ListStablecoinMarketsResponse> {
     let path = "/api/market/v1/list-stablecoin-markets";
-    const url = this.baseURL + path;
+    const params = new URLSearchParams();
+    if (req.coins && req.coins.length > 0) req.coins.forEach(v => params.append("coins", v));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -299,9 +808,8 @@ export class MarketServiceClient {
     };
 
     const resp = await this.fetchFn(url, {
-      method: "POST",
+      method: "GET",
       headers,
-      body: JSON.stringify(req),
       signal: options?.signal,
     });
 
@@ -312,7 +820,7 @@ export class MarketServiceClient {
     return await resp.json() as ListStablecoinMarketsResponse;
   }
 
-  async listEtfFlows(req: ListEtfFlowsRequest, options?: MarketServiceCallOptions): Promise<ListEtfFlowsResponse> {
+  async listEtfFlows(_req: ListEtfFlowsRequest, options?: MarketServiceCallOptions): Promise<ListEtfFlowsResponse> {
     let path = "/api/market/v1/list-etf-flows";
     const url = this.baseURL + path;
 
@@ -323,9 +831,8 @@ export class MarketServiceClient {
     };
 
     const resp = await this.fetchFn(url, {
-      method: "POST",
+      method: "GET",
       headers,
-      body: JSON.stringify(req),
       signal: options?.signal,
     });
 
@@ -338,6 +845,31 @@ export class MarketServiceClient {
 
   async getCountryStockIndex(req: GetCountryStockIndexRequest, options?: MarketServiceCallOptions): Promise<GetCountryStockIndexResponse> {
     let path = "/api/market/v1/get-country-stock-index";
+    const params = new URLSearchParams();
+    if (req.countryCode != null && req.countryCode !== "") params.set("country_code", String(req.countryCode));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as GetCountryStockIndexResponse;
+  }
+
+  async listGulfQuotes(_req: ListGulfQuotesRequest, options?: MarketServiceCallOptions): Promise<ListGulfQuotesResponse> {
+    let path = "/api/market/v1/list-gulf-quotes";
     const url = this.baseURL + path;
 
     const headers: Record<string, string> = {
@@ -347,9 +879,8 @@ export class MarketServiceClient {
     };
 
     const resp = await this.fetchFn(url, {
-      method: "POST",
+      method: "GET",
       headers,
-      body: JSON.stringify(req),
       signal: options?.signal,
     });
 
@@ -357,7 +888,372 @@ export class MarketServiceClient {
       return this.handleError(resp);
     }
 
-    return await resp.json() as GetCountryStockIndexResponse;
+    return await resp.json() as ListGulfQuotesResponse;
+  }
+
+  async analyzeStock(req: AnalyzeStockRequest, options?: MarketServiceCallOptions): Promise<AnalyzeStockResponse> {
+    let path = "/api/market/v1/analyze-stock";
+    const params = new URLSearchParams();
+    if (req.symbol != null && req.symbol !== "") params.set("symbol", String(req.symbol));
+    if (req.name != null && req.name !== "") params.set("name", String(req.name));
+    if (req.includeNews) params.set("include_news", String(req.includeNews));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as AnalyzeStockResponse;
+  }
+
+  async getStockAnalysisHistory(req: GetStockAnalysisHistoryRequest, options?: MarketServiceCallOptions): Promise<GetStockAnalysisHistoryResponse> {
+    let path = "/api/market/v1/get-stock-analysis-history";
+    const params = new URLSearchParams();
+    if (req.symbols && req.symbols.length > 0) req.symbols.forEach(v => params.append("symbols", v));
+    if (req.limitPerSymbol != null && req.limitPerSymbol !== 0) params.set("limit_per_symbol", String(req.limitPerSymbol));
+    if (req.includeNews) params.set("include_news", String(req.includeNews));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as GetStockAnalysisHistoryResponse;
+  }
+
+  async backtestStock(req: BacktestStockRequest, options?: MarketServiceCallOptions): Promise<BacktestStockResponse> {
+    let path = "/api/market/v1/backtest-stock";
+    const params = new URLSearchParams();
+    if (req.symbol != null && req.symbol !== "") params.set("symbol", String(req.symbol));
+    if (req.name != null && req.name !== "") params.set("name", String(req.name));
+    if (req.evalWindowDays != null && req.evalWindowDays !== 0) params.set("eval_window_days", String(req.evalWindowDays));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as BacktestStockResponse;
+  }
+
+  async listStoredStockBacktests(req: ListStoredStockBacktestsRequest, options?: MarketServiceCallOptions): Promise<ListStoredStockBacktestsResponse> {
+    let path = "/api/market/v1/list-stored-stock-backtests";
+    const params = new URLSearchParams();
+    if (req.symbols && req.symbols.length > 0) req.symbols.forEach(v => params.append("symbols", v));
+    if (req.evalWindowDays != null && req.evalWindowDays !== 0) params.set("eval_window_days", String(req.evalWindowDays));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as ListStoredStockBacktestsResponse;
+  }
+
+  async listCryptoSectors(_req: ListCryptoSectorsRequest, options?: MarketServiceCallOptions): Promise<ListCryptoSectorsResponse> {
+    let path = "/api/market/v1/list-crypto-sectors";
+    const url = this.baseURL + path;
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as ListCryptoSectorsResponse;
+  }
+
+  async listDefiTokens(_req: ListDefiTokensRequest, options?: MarketServiceCallOptions): Promise<ListDefiTokensResponse> {
+    let path = "/api/market/v1/list-defi-tokens";
+    const url = this.baseURL + path;
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as ListDefiTokensResponse;
+  }
+
+  async listAiTokens(_req: ListAiTokensRequest, options?: MarketServiceCallOptions): Promise<ListAiTokensResponse> {
+    let path = "/api/market/v1/list-ai-tokens";
+    const url = this.baseURL + path;
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as ListAiTokensResponse;
+  }
+
+  async listOtherTokens(_req: ListOtherTokensRequest, options?: MarketServiceCallOptions): Promise<ListOtherTokensResponse> {
+    let path = "/api/market/v1/list-other-tokens";
+    const url = this.baseURL + path;
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as ListOtherTokensResponse;
+  }
+
+  async getFearGreedIndex(_req: GetFearGreedIndexRequest, options?: MarketServiceCallOptions): Promise<GetFearGreedIndexResponse> {
+    let path = "/api/market/v1/get-fear-greed-index";
+    const url = this.baseURL + path;
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as GetFearGreedIndexResponse;
+  }
+
+  async listEarningsCalendar(req: ListEarningsCalendarRequest, options?: MarketServiceCallOptions): Promise<ListEarningsCalendarResponse> {
+    let path = "/api/market/v1/list-earnings-calendar";
+    const params = new URLSearchParams();
+    if (req.fromDate != null && req.fromDate !== "") params.set("fromDate", String(req.fromDate));
+    if (req.toDate != null && req.toDate !== "") params.set("toDate", String(req.toDate));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as ListEarningsCalendarResponse;
+  }
+
+  async getCotPositioning(_req: GetCotPositioningRequest, options?: MarketServiceCallOptions): Promise<GetCotPositioningResponse> {
+    let path = "/api/market/v1/get-cot-positioning";
+    const url = this.baseURL + path;
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as GetCotPositioningResponse;
+  }
+
+  async getInsiderTransactions(req: GetInsiderTransactionsRequest, options?: MarketServiceCallOptions): Promise<GetInsiderTransactionsResponse> {
+    let path = "/api/market/v1/get-insider-transactions";
+    const params = new URLSearchParams();
+    if (req.symbol != null && req.symbol !== "") params.set("symbol", String(req.symbol));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as GetInsiderTransactionsResponse;
+  }
+
+  async getMarketBreadthHistory(_req: GetMarketBreadthHistoryRequest, options?: MarketServiceCallOptions): Promise<GetMarketBreadthHistoryResponse> {
+    let path = "/api/market/v1/get-market-breadth-history";
+    const url = this.baseURL + path;
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as GetMarketBreadthHistoryResponse;
+  }
+
+  async getGoldIntelligence(_req: GetGoldIntelligenceRequest, options?: MarketServiceCallOptions): Promise<GetGoldIntelligenceResponse> {
+    let path = "/api/market/v1/get-gold-intelligence";
+    const url = this.baseURL + path;
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as GetGoldIntelligenceResponse;
+  }
+
+  async getHyperliquidFlow(_req: GetHyperliquidFlowRequest, options?: MarketServiceCallOptions): Promise<GetHyperliquidFlowResponse> {
+    let path = "/api/market/v1/get-hyperliquid-flow";
+    const url = this.baseURL + path;
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as GetHyperliquidFlowResponse;
   }
 
   private async handleError(resp: Response): Promise<never> {
